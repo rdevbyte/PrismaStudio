@@ -642,6 +642,21 @@
     return { edges: uniqEdges, label };
   }
 
+  /* ---------------- noise floor ----------------
+     With enough rows, tiny effects appear purely by chance. These give the
+     magnitude we'd expect from random data, so the UI can distinguish
+     "found nothing" from "couldn't compute". */
+  function noiseFloor(n) {
+    if (!n || n < 4) return { r: 1, eta2: 1, v: 1 };
+    const seR = 1 / Math.sqrt(n - 3);      // SE of Pearson r under the null
+    return {
+      n,
+      r: 1.96 * seR,                        // |r| exceeded by 5% of random pairs
+      eta2: 2 / (n - 1),                    // ~E[eta2] for a 3-level split
+      v: 1.96 / Math.sqrt(n),               // rough Cramer's V chance level
+    };
+  }
+
   /* ---------------- formatting ---------------- */
   function fmtNum(v, opts = {}) {
     if (v == null || !isFinite(v)) return '—';
@@ -670,6 +685,6 @@
     profileColumn, qualityReport, numericCorrelations, driverAnalysis,
     categoricalAssociations, crossTab, detectAnomalies, buildTimeSeries,
     movingAverage, forecast, seasonality, pareto, segmentScan, binNumeric,
-    strengthLabel, fmtNum, fmtPct, fmtP, fmtDate,
+    strengthLabel, fmtNum, fmtPct, fmtP, fmtDate, noiseFloor,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

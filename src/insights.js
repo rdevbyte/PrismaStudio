@@ -379,6 +379,22 @@
       }
     }
 
+    /* --- no-signal notice --- */
+    if (!driverResults.length && !correlations.length && rows.length > 50) {
+      const nf = ctx.noise || {};
+      const nDrivers = (ctx.driverAll || []).length, nPairs = (ctx.correlationsAll || []).length;
+      push({
+        kind: 'nosignal', score: 95, icon: '🔍', tone: 'strong',
+        title: 'No relationships detected — the columns appear independent',
+        body: `Tested <b>${nDrivers.toLocaleString()}</b> driver/metric combinations and <b>${nPairs.toLocaleString()}</b> numeric pairs across ${rows.length.toLocaleString()} rows. ` +
+          `Nothing exceeded the noise floor: the largest correlation was |r| = ${(ctx.correlationsAll && ctx.correlationsAll[0] ? Math.abs(ctx.correlationsAll[0].r) : 0).toFixed(3)} against a chance threshold of ${(nf.r || 0.03).toFixed(3)}, ` +
+          `and the largest η² was ${((ctx.driverAll && ctx.driverAll[0] ? ctx.driverAll[0].eta2 : 0) * 100).toFixed(2)}%. ` +
+          `The analysis completed correctly — there is genuinely no structure in this data to find.`,
+        why: 'Randomly generated data has independent columns by construction, so every test returns a null result. Column profiles, distributions and data-quality checks below are still fully valid.',
+        data: null,
+      });
+    }
+
     /* --- quality --- */
     if (quality.issues.length) {
       const high = quality.issues.filter((i) => i.sev === 'high');
@@ -448,6 +464,13 @@
       parts.push(f.r2 < 0.15
         ? `Over time ${primaryMetric} shows <b>no meaningful trend</b> (R² = ${f.r2.toFixed(2)}) — this data is cross-sectional rather than a time series, so no projection is offered.`
         : `Over time ${primaryMetric} is ${f.slope > 0 ? 'rising' : 'falling'} with R² = ${f.r2.toFixed(2)}${f.r2 < 0.3 ? ' — weak, so the projection is indicative only' : ''}.`);
+    }
+    // Be explicit when the analysis ran but found nothing, rather than staying
+    // silent and letting the report look broken.
+    const noSignal = !driverResults.length && !correlations.length;
+    if (noSignal && rows.length > 50) {
+      const nf = ctx.noise || {};
+      parts.push(`<b>No statistically meaningful relationships were found in this file.</b> Every column pair and grouping was tested; the strongest effects sit at the level random noise produces for ${rows.length.toLocaleString()} rows (|r| under ${(nf.r || 0.03).toFixed(3)}). That is the signature of independently generated values — common in synthetic or randomly generated test data.`);
     }
     parts.push(`Data quality scores <b>${quality.score}/100</b>${quality.issues.length ? ` with ${quality.issues.length} flagged issue${quality.issues.length === 1 ? '' : 's'}` : ' with no issues detected'}. ${findings.length} findings were generated below.`);
     return parts.join(' ');

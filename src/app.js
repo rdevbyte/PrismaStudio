@@ -217,10 +217,13 @@
     const allCats = [...catCols, ...derivedCats];
 
     const correlations = A.numericCorrelations(rows, numCols, 0.15);
+    const correlationsAll = A.numericCorrelations(rows, numCols, 0);
     // always test the headline metric first, then the other numerics
     const metricsForDrivers = [...new Set([primaryMetric, ...numCols].filter(Boolean))].slice(0, 14);
-    const driverResults = A.driverAnalysis(rows, allCats, metricsForDrivers).filter((d) => d.eta2 > 0.005);
+    const driverAll = A.driverAnalysis(rows, allCats, metricsForDrivers);
+    const driverResults = driverAll.filter((d) => d.eta2 > 0.005);
     const catAssoc = A.categoricalAssociations(rows, catCols, 0.12);
+    const catAssocAll = A.categoricalAssociations(rows, catCols, 0);
     const anomalies = A.detectAnomalies(rows, profiles);
     const quality = A.qualityReport(profiles, rows);
     // a metric's own quintile band trivially "predicts" it — exclude from the scan
@@ -258,7 +261,9 @@
 
     const ctx = {
       rows, columns, profiles, byName, typeOf, numCols, catCols: allCats, baseCats: catCols, dateCols, derivedCats,
-      primaryMetric, correlations, driverResults, catAssoc, anomalies, quality, segments,
+      primaryMetric, correlations, correlationsAll, driverResults, driverAll,
+      catAssoc, catAssocAll, anomalies, quality, segments,
+      noise: A.noiseFloor(rows.length),
       paretoResults, series, forecastResult, seasonal, dateCol, partialTrimmed,
       domain: I.detectDomain(columns),
     };
@@ -388,8 +393,26 @@
   /* ---------- drivers ---------- */
   function renderDrivers(a) {
     if (!a.driverResults.length) {
-      return `<section class="card"><div class="sechead"><span class="sicon">🎯</span><h2>Driver analysis</h2></div>
-        <p class="empty">Driver analysis needs at least one numeric metric and one categorical column with 2+ groups of 3+ rows each. This file didn't provide that combination — check the column types in the preview step.</p></section>`;
+      const tested = a.driverAll ? a.driverAll.length : 0;
+      // Nothing cleared the bar. Distinguish "couldn't run" from "ran and
+      // found no signal" — they need completely different responses.
+      if (!tested) {
+        return `<section class="card"><div class="sechead"><span class="sicon">🎯</span><h2>Driver analysis</h2></div>
+          <p class="empty">Driver analysis needs at least one numeric metric and one categorical column with 2+ groups of 3+ rows each. This file has <b>${a.numCols.length} numeric</b> and <b>${a.baseCats.length} categorical</b> usable columns — check the column types in the preview step.</p></section>`;
+      }
+      const top = a.driverAll.slice(0, 12);
+      const floor = a.noise ? a.noise.eta2 : 0.0005;
+      return `<section class="card">
+        <div class="sechead"><span class="sicon">🎯</span><h2>No drivers found</h2><span class="dim small">${tested.toLocaleString()} combinations tested</span></div>
+        <p class="explain"><b>The analysis ran successfully — it just found nothing.</b> Every one of the ${tested.toLocaleString()} driver/metric combinations was tested with one-way ANOVA, and none explained more than <b>${(top[0].eta2 * 100).toFixed(2)}%</b> of its metric's variation. With ${a.rows.length.toLocaleString()} rows, random noise alone produces η² around ${(floor * 100).toFixed(2)}%, so these results are indistinguishable from chance.</p>
+        <p class="explain">This is the expected result when the values in each column are independent of one another — most commonly with <b>randomly generated or synthetic data</b>, where no real relationships were built in. On real-world data you would normally see at least a few η² values above 0.06.</p>
+        <h4 class="mt">Strongest combinations tested (all below the significance bar)</h4>
+        <div class="tablewrap"><table><thead><tr><th>Driver</th><th>Metric</th><th class="num">η² explained</th><th class="num">F</th><th class="num">Significance</th><th>Highest group</th><th>Lowest group</th></tr></thead><tbody>
+        ${top.map((d) => `<tr><td><b>${esc(d.driver)}</b></td><td>${esc(d.metric)}</td>
+          <td class="num">${(d.eta2 * 100).toFixed(3)}%</td><td class="num">${isFinite(d.f) ? d.f.toFixed(2) : '—'}</td><td class="num">${fmtP(d.p)}</td>
+          <td>${esc(trunc(d.top.key, 18))} <span class="dim">${fmtNum(d.top.mean, { currency: a.typeOf(d.metric) === 'currency' })}</span></td>
+          <td>${esc(trunc(d.bottom.key, 18))} <span class="dim">${fmtNum(d.bottom.mean, { currency: a.typeOf(d.metric) === 'currency' })}</span></td></tr>`).join('')}
+        </tbody></table></div></section>`;
     }
     // lead with drivers of the headline metric so the most relevant rows are visible first
     const ordered = [...a.driverResults.filter((d) => d.metric === a.primaryMetric),
@@ -428,7 +451,20 @@
   function renderRelations(a) {
     let html = '<section class="card"><div class="sechead"><span class="sicon">🔗</span><h2>Numeric relationships</h2><span class="dim small">Pearson r, Spearman ρ, significance</span></div>';
     if (!a.correlations.length) {
-      html += `<p class="empty">No numeric pairs reached |r| ≥ 0.15. That usually means the numeric columns are independent, or there are too few numeric columns (this file has ${a.numCols.length}).</p>`;
+      const all = a.correlationsAll || [];
+      const floor = a.noise ? a.noise.r : 0.03;
+      if (!all.length) {
+        html += `<p class="empty">Only ${a.numCols.length} usable numeric column${a.numCols.length === 1 ? '' : 's'} were found, so there are no pairs to correlate. Check the column types in the preview step.</p>`;
+      } else {
+        html += `<p class="explain"><b>All ${all.length.toLocaleString()} numeric pairs were tested — none showed a meaningful relationship.</b> The strongest was |r| = ${Math.abs(all[0].r).toFixed(3)}, against a chance threshold of ±${floor.toFixed(3)} for ${a.rows.length.toLocaleString()} rows. In other words, the largest correlation here is about what you would get from random numbers.</p>
+        <p class="explain">This is typical of <b>synthetic or randomly generated data</b>. Real datasets almost always contain some correlated measures (e.g. experience and salary, or size and cost).</p>
+        <h4 class="mt">Strongest pairs tested (all below the threshold)</h4>
+        <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">r</th><th class="num">r²</th><th class="num">Spearman ρ</th><th class="num">n</th><th class="num">Significance</th></tr></thead><tbody>
+        ${all.slice(0, 12).map((c) => `<tr><td>${esc(c.a)}</td><td>${esc(c.b)}</td>
+          <td class="num ${c.r >= 0 ? 'pos' : 'neg'}">${c.r.toFixed(4)}</td><td class="num">${(c.r * c.r * 100).toFixed(2)}%</td>
+          <td class="num">${isFinite(c.rho) ? c.rho.toFixed(4) : '—'}</td><td class="num">${c.n}</td><td class="num">${fmtP(c.p)}</td></tr>`).join('')}
+        </tbody></table></div>`;
+      }
     } else {
       html += `<p class="explain">r measures straight-line association from −1 to +1. r² is the share of variance shared. Where Spearman ρ clearly exceeds r, the relationship is monotonic but curved — a linear model would understate it.</p>
       <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">r</th><th class="num">r²</th><th class="num">Spearman ρ</th><th class="num">n</th><th class="num">Significance</th><th>Reading</th></tr></thead><tbody>
@@ -461,7 +497,17 @@
     html += '</section>';
 
     html += '<section class="card"><div class="sechead"><span class="sicon">🧩</span><h2>Categorical associations</h2><span class="dim small">Cramér\'s V · chi-square</span></div>';
-    if (!a.catAssoc.length) html += '<p class="empty">No categorical pairs showed meaningful association (Cramér\'s V ≥ 0.12).</p>';
+    if (!a.catAssoc.length) {
+      const all = a.catAssocAll || [];
+      if (!all.length) {
+        html += `<p class="empty">Fewer than two usable categorical columns were found, so there are no pairs to test.</p>`;
+      } else {
+        html += `<p class="explain"><b>All ${all.length.toLocaleString()} categorical pairs were tested — none showed meaningful association.</b> The strongest was Cramér's V = ${all[0].v.toFixed(3)} (${esc(all[0].a)} ↔ ${esc(all[0].b)}), where 0 means completely independent. Values this low mean knowing one field tells you essentially nothing about the other.</p>
+        <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">Cramér's V</th><th class="num">χ²</th><th class="num">Significance</th><th class="num">Levels</th></tr></thead><tbody>
+        ${all.slice(0, 10).map((c) => `<tr><td>${esc(c.a)}</td><td>${esc(c.b)}</td><td class="num">${c.v.toFixed(4)}</td><td class="num">${c.chi2.toFixed(1)}</td><td class="num">${fmtP(c.p)}</td><td class="num">${c.la}×${c.lb}</td></tr>`).join('')}
+        </tbody></table></div>`;
+      }
+    }
     else html += `<p class="explain">Cramér's V measures how strongly two categorical fields move together, from 0 (independent) to 1 (one perfectly predicts the other). Values above 0.7 often signal redundant or derived columns.</p>
       <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">Cramér's V</th><th class="num">χ²</th><th class="num">Significance</th><th class="num">Levels</th><th>Reading</th></tr></thead><tbody>
       ${a.catAssoc.slice(0, 20).map((c) => `<tr><td>${esc(c.a)}</td><td>${esc(c.b)}</td><td class="num"><b>${c.v.toFixed(3)}</b></td><td class="num">${c.chi2.toFixed(1)}</td><td class="num">${fmtP(c.p)}</td><td class="num">${c.la}×${c.lb}</td>
