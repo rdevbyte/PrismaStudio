@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PrismaStudio — Zero-Persistence Analytics</title>
+<meta name="description" content="Drop any spreadsheet and get drivers, correlations, segments, profiles, trends and projections — computed entirely in your browser. Nothing uploaded, nothing stored, no AI." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234F6DF5'/%3E%3Cpath d='M8 22V14M16 22V8M24 22V17' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
+<style>/*__CSS__*/</style>
+</head>
+<body>
+
+<header class="appbar" id="appbar">
+  <div class="logo">◧</div>
+  <div class="brand">PrismaStudio</div>
+  <span class="badge"><span class="dot"></span>no-AI · zero-persistence</span>
+  <div class="spacer"></div>
+  <button class="btn hideoff" id="exportBtn">⬇ Export report</button>
+  <select id="themeSel" aria-label="Theme">
+    <option value="light">Light theme</option>
+    <option value="dark">Dark theme</option>
+    <option value="neon">Neon theme</option>
+    <option value="ocean">Ocean theme</option>
+    <option value="sunset">Sunset theme</option>
+    <option value="corporate">Corporate theme</option>
+    <option value="pastel">Pastel theme</option>
+    <option value="mono">Monochrome theme</option>
+  </select>
+  <button class="btn hideoff" id="clearBtn">↺ Clear session</button>
+</header>
+
+<main class="wrap">
+  <div id="landing">
+    <section class="hero">
+      <h1>Drop your data.<br><span class="g">Get the whole picture.</span></h1>
+      <p>Drivers, correlations, segments, distributions, anomalies, trends and projections — every column profiled, every relationship tested. Computed 100% in your browser. Nothing is uploaded, stored, or sent to any AI.</p>
+    </section>
+
+    <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload a data file">
+      <div class="dz-icon">⬆</div>
+      <div class="dz-title">Drag &amp; drop a file here</div>
+      <p class="dim">or click to browse — you can also paste CSV from your clipboard (Ctrl+V)</p>
+      <div class="chips">
+        <span class="chip">CSV</span><span class="chip">TSV</span><span class="chip">XLSX</span>
+        <span class="chip">max 50 MB</span><span class="chip">health data auto-blocked</span>
+      </div>
+    </div>
+    <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xlsm" style="display:none" />
+
+    <div class="samples">
+      <button class="btn" id="sampleBtn">✨ Try sales sample (time series)</button>
+      <button class="btn" id="sampleInsuranceBtn">🚗 Try auto-insurance sample (45 columns)</button>
+    </div>
+
+    <div class="featgrid">
+      <div class="feat"><span class="fi">🎯</span><h4>Driver analysis</h4><p>One-way ANOVA with η² effect sizes ranks which categorical fields actually move each metric — the core of any wide, category-heavy dataset.</p></div>
+      <div class="feat"><span class="fi">🔗</span><h4>Relationship testing</h4><p>Pearson r, Spearman ρ, significance tests and a full correlation matrix for numerics; Cramér's V and chi-square for categoricals.</p></div>
+      <div class="feat"><span class="fi">🧭</span><h4>Segment scan</h4><p>Every value of every category ranked by how far it deviates from the average, size-adjusted so small segments don't produce false alarms.</p></div>
+      <div class="feat"><span class="fi">📚</span><h4>Full column profiles</h4><p>Quartiles, skew, kurtosis, CV, histograms, entropy balance and completeness for all columns — not just the two the tool liked best.</p></div>
+      <div class="feat"><span class="fi">🔬</span><h4>Interactive explorer</h4><p>Pivot any two fields, box-plot any metric by any group, scatter any pair. The analysis follows your questions.</p></div>
+      <div class="feat"><span class="fi">🔒</span><h4>Zero persistence</h4><p>In-memory only. No uploads, no cookies, no analytics, no AI. Only your theme preference is remembered.</p></div>
+    </div>
+
+    <p class="guarantee"><b>Zero-persistence guarantee:</b> all analysis runs in-memory in your browser — nothing is uploaded, stored, or sent to any service. Sessions clear when you close the tab. Only your theme preference is kept in localStorage. Health/medical data is auto-blocked.</p>
+  </div>
+
+  <div id="dashboard" style="display:none"></div>
+</main>
+
+<div id="modalRoot"></div>
+<div class="busy" id="busy"><div class="busybox"><div class="spin"></div><div id="busyMsg">Working…</div></div></div>
+<div class="toast" id="toast"></div>
+
+<script>/*__JS__*/</script>
+</body>
+</html>

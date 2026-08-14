@@ -1,0 +1,14 @@
+node_modules/
+.cache/
+.npm/
+.vercel/
+dist/
+shots/
+uploads/
+*.log
+.DS_Store
+
+# never commit local CLI credentials
+.local/
+.vercel/
+.sudo_as_admin_successful
