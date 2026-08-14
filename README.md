@@ -133,6 +133,11 @@ Each chart type has its own entrance timeline, triggered by an `IntersectionObse
 
 Charts re-animate when their data changes — changing a pivot field or explorer metric replays the entrance rather than snapping.
 
+Charts are revealed by an `IntersectionObserver`, which has two failure modes the code guards against explicitly:
+
+- **Hidden tab panes.** Inactive tabs are `display:none`, so their contents have zero dimensions and the observer never reports them as intersecting. Registration is deferred until the pane is actually displayed (one frame after the tab is clicked, so layout has settled).
+- **Scrolling past too fast.** Jumping straight to the bottom (End key, `scrollTo`, anchor link) can skip an element without ever firing an intersection. Anything scrolled past is revealed instantly, and a debounced scroll/resize sweep catches stragglers — so content can never be left permanently at `opacity: 0`.
+
 **Accessibility:** every animation is gated behind `prefers-reduced-motion`. When a user has reduced motion enabled, `PrismaAnim.enabled` is `false`, all tweens are skipped, and content renders immediately at full opacity — verified in the test suite, since animation-on-reveal is a common way to accidentally hide content from people who disable motion.
 
 ### Rendering note
