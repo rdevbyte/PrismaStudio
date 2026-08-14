@@ -24,17 +24,34 @@ So: the files must be copied out of this workspace and pushed to your repo. Step
 
 ---
 
+## Which file do I use?
+
+| File | What it is | Unzip? |
+|---|---|---|
+| **`dist/index.html`** | The finished app, one file | n/a — **use this one** |
+| `PrismaStudio.html` | Identical file, different name | n/a |
+| `PrismaStudio-SITE.zip` | Contains just `index.html` | Yes, if you want the folder |
+| `PrismaStudio-deploy.zip` | **Source code**, needs building | Yes, then `node build.js` |
+
+**You do not need either zip.** They exist for convenience. The app is a single
+self-contained HTML file — download `dist/index.html` and you have everything.
+
+`PrismaStudio-deploy.zip` is source only: it has no `dist/` inside, so if you
+upload it to Vercel without running the build you get nothing to serve.
+
 ## Deploy (pick one)
 
-### Option A — drag and drop, no git, ~30 seconds
+### Option A — drag and drop, no git, ~30 seconds ← easiest
 
-The app is a single self-contained file. You don't need a build step at all.
+1. Download **`dist/index.html`**.
+2. Put it alone in a folder (any name, e.g. `prismastudio`).
+   The file **must** be named `index.html` so Vercel serves it at `/`.
+3. Go to **vercel.com/new** → drag the *folder* (not the file) onto the page.
 
-1. Download `dist/index.html` from this workspace.
-2. Put it alone in a folder.
-3. Go to **vercel.com/new** → drag the folder onto the page.
+Done. No repo, no build, no zip, no settings.
 
-Done. No repo, no build, no settings. Good for getting a live URL immediately.
+If you prefer, `PrismaStudio-SITE.zip` already contains exactly that folder
+layout — unzip it and drag the resulting folder.
 
 ### Option B — GitHub (proper setup)
 
