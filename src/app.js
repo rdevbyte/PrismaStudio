@@ -12,6 +12,7 @@
 
   const STATE = {
     dataset: null, types: {}, analysis: null, filters: {}, pivot: {}, explore: {},
+    attestation: null, pendingScan: null, pendingDataset: null,
   };
 
   /* ================= theming ================= */
@@ -84,12 +85,22 @@
 
   function loadDataset(ds) {
     const scan = P.healthScan(ds.columns, ds.rows);
-    if (scan.blocked) { hideBusy(); return showHealthBlock(scan.terms); }
+    if (scan.blocked) {
+      hideBusy();
+      // Hold the parsed data in memory (never on disk) so the user can either
+      // cancel — which discards it — or attest and continue without re-uploading.
+      STATE.pendingDataset = ds;
+      return showHealthBlock(scan);
+    }
+    acceptDataset(ds, scan.override);
+  }
+
+  function acceptDataset(ds, override) {
     STATE.dataset = ds;
     STATE.types = {};
     ds.columns.forEach((c) => { STATE.types[c] = A.inferType(ds.rows.map((r) => r[c]), c); });
     hideBusy();
-    renderPreview(scan.override);
+    renderPreview(override);
   }
 
   function showBusy(msg) { el('busy').style.display = 'flex'; el('busyMsg').textContent = msg; }
@@ -98,12 +109,45 @@
   function showError(title, msg) {
     el('modalRoot').innerHTML = `<div class="modal-bg"><div class="modal"><div class="modal-icon err">!</div><h3>${esc(title)}</h3><p>${esc(msg)}</p><div class="modal-actions"><button class="btn primary" onclick="document.getElementById('modalRoot').innerHTML=''">Got it</button></div></div></div>`;
   }
-  function showHealthBlock(terms) {
-    el('modalRoot').innerHTML = `<div class="modal-bg"><div class="modal"><div class="modal-icon err">⛔</div><h3>Health data not supported</h3>
-      <p>This file looks like it contains health or medical information, which this tool deliberately does not process (HIPAA guardrail). The file was <b>never analysed</b> and has been dropped from memory.</p>
-      <p class="dim small">Triggered by: ${terms.map((t) => `“${esc(t)}”`).join(', ')}</p>
-      <div class="note">If this file genuinely holds no protected health information, add a line containing <b>“No PHI”</b> or <b>“de-identified”</b> and re-upload.</div>
-      <div class="modal-actions"><button class="btn primary" onclick="document.getElementById('modalRoot').innerHTML=''">Understood</button></div></div></div>`;
+  function showHealthBlock(scan) {
+    const terms = scan.terms || [];
+    STATE.pendingScan = scan;
+    el('modalRoot').innerHTML = `<div class="modal-bg"><div class="modal"><div class="modal-icon err">\u26d4</div>
+      <h3>This file looks like health data</h3>
+      <p>PrismaStudio does not process protected health information. The file has <b>not</b> been analysed and is still only in your browser's memory.</p>
+      <p class="dim small">Matched: ${terms.map((t) => `\u201c${esc(t)}\u201d`).join(', ') || 'clinical terminology'}</p>
+
+      <div class="note">If this is a <b>false positive</b> \u2014 for example a school, HR or insurance file that happens to use a clinical-sounding word \u2014 you can confirm below and continue.</div>
+
+      <label class="attest">
+        <input type="checkbox" id="attestBox" />
+        <span>I confirm this file contains <b>no protected health information</b> and that I am authorised to analyse it.</span>
+      </label>
+
+      <div class="modal-actions">
+        <button class="btn" id="hbCancel">Cancel</button>
+        <button class="btn primary" id="hbProceed" disabled>Analyse anyway</button>
+      </div>
+      <p class="dim small mt-s">Analysis runs entirely in your browser either way \u2014 nothing is uploaded or stored.</p>
+    </div></div>`;
+    if (global.PrismaAnim) global.PrismaAnim.modalIn($('.modal'));
+    const box = el('attestBox'), go = el('hbProceed');
+    box.addEventListener('change', () => { go.disabled = !box.checked; });
+    el('hbCancel').addEventListener('click', () => {
+      el('modalRoot').innerHTML = '';
+      STATE.dataset = null; STATE.pendingScan = null; STATE.pendingDataset = null;
+      el('fileInput').value = '';
+    });
+    go.addEventListener('click', () => {
+      if (!box.checked) return;
+      // Record the attestation in-memory for this session only, so the report
+      // and any export carry a visible note of who bypassed the guard and when.
+      const ds = STATE.pendingDataset;
+      STATE.attestation = { at: new Date().toISOString(), terms, file: ds && ds.name };
+      STATE.pendingDataset = null;
+      el('modalRoot').innerHTML = '';
+      if (ds) acceptDataset(ds, false);
+    });
   }
 
   /* ================= preview & type editor ================= */
@@ -237,7 +281,8 @@
         <span class="pill">${ds.rows.length.toLocaleString()} rows × ${ds.columns.length} cols</span>
         ${a.domain ? `<span class="pill accent">${esc(a.domain.label)} detected</span>` : ''}
         <span class="pill">${a.findings.length} findings</span>
-        <span class="pill">analysed in ${a.elapsed}ms</span></div>
+        <span class="pill">analysed in ${a.elapsed}ms</span>
+        ${STATE.attestation ? `<span class="pill warnpill" title="Attested ${esc(STATE.attestation.at)}">\u26a0 No-PHI attestation on file</span>` : ''}</div>
 
       <section class="card summary">
         <div class="sechead"><span class="sicon">📋</span><h2>Executive summary</h2></div>
@@ -833,7 +878,7 @@
   }
 
   function clearSession() {
-    STATE.dataset = null; STATE.analysis = null;
+    STATE.dataset = null; STATE.analysis = null; STATE.attestation = null; STATE.pendingScan = null; STATE.pendingDataset = null;
     el('dashboard').style.display = 'none'; el('dashboard').innerHTML = '';
     el('landing').style.display = 'block';
     el('appbar').classList.remove('active');
@@ -850,6 +895,7 @@
     const html = `<!doctype html><html data-theme="${theme}"><head><meta charset="utf-8"><title>PrismaStudio report — ${esc(STATE.dataset.name)}</title><style>${style}
       .tabpane{display:block!important} .tabs{display:none} .controls{display:none} .exph{margin:32px 0 8px;font-size:22px}</style></head>
       <body><main class="wrap"><h1>PrismaStudio report</h1><p class="dim">${esc(STATE.dataset.name)} · ${a.rows.length.toLocaleString()} rows × ${a.columns.length} columns · generated ${new Date().toLocaleString()}</p>
+      ${STATE.attestation ? `<section class="card"><p class="dim small"><b>No-PHI attestation:</b> the uploader confirmed on ${esc(new Date(STATE.attestation.at).toLocaleString())} that “${esc(STATE.attestation.file || 'this file')}” contains no protected health information. Flagged terms: ${STATE.attestation.terms.map((t) => esc(t)).join(', ') || 'n/a'}.</p></section>` : ''}
       <section class="card summary"><h2>Executive summary</h2><p class="lead">${a.summary}</p></section>
       ${renderKpiStrip(a)}${panes}</main></body></html>`;
     download(html, `prismastudio-report-${Date.now()}.html`, 'text/html');

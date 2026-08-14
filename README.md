@@ -78,7 +78,7 @@ Since the output is a single static file, any host works — Netlify, GitHub Pag
 1. **Parse** — CSV/TSV (delimiter auto-sniffed, RFC-4180 quoting) or XLSX. The XLSX reader unzips via the browser-native `DecompressionStream` and reads shared strings, number formats and date serials directly — no SheetJS.
 2. **Header detection** — scans the first 8 rows and skips title/preamble lines, so exported reports with a title block parse correctly.
 3. **Type inference** — date / currency / percent / number / boolean / category / id / text, with name-aware rules so `Zip Territory` becomes a category rather than a metric, and `Premium` becomes currency. Every type is overridable in the preview.
-4. **Privacy guard** — health/PHI keyword scan runs *before* analysis; matching files are dropped from memory unedited. Override with a `No PHI` / `de-identified` declaration.
+4. **Privacy guard** — a weighted, word-boundary clinical-term scan runs *before* analysis. Unambiguous identifiers (MRN, ICD-10, patient, prescription) block on their own; softer words (immunization, clinical, hospital) must co-occur, and need to be more numerous in an education context — so a school gradebook containing "Philosophy" or "immunization_status" is not blocked. Flagged files can proceed via an in-app **no-PHI attestation**, which is recorded in the session and printed into exports. See `LEGAL-NOTES.md`.
 5. **Profile** — full descriptive statistics per column.
 6. **Derive** — numeric columns are bucketed into quintiles so they can be tested as categorical drivers.
 7. **Test** — ANOVA, correlations, Cramér's V, segment scan, Pareto, anomalies, seasonality, forecast.

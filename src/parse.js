@@ -251,20 +251,62 @@
     return { name, columns, rows, headerRow, parseMs: Math.round(performance.now() - t0) };
   }
 
-  /* ---------------- health-data guard ---------------- */
-  const HEALTH_TERMS = ['diagnosis', 'diagnoses', 'icd-10', 'icd10', 'icd-9', 'patient name', 'medical record', 'mrn', 'phi', 'prescription', 'medication', 'dosage', 'treatment plan', 'symptom', 'lab result', 'blood pressure', 'cholesterol', 'immunization', 'clinical', 'hospital admission', 'discharge summary', 'physician note', 'health plan beneficiary'];
-  const NEGATION = /\b(no phi|de-?identified|synthetic|anonymi[sz]ed|test data|dummy data|not phi)\b/i;
+  /* ---------------- health-data guard ----------------
+     Matching is word-boundary based, not substring. "phi" as a loose substring
+     matched Philosophy, Philadelphia, Sophia, Memphis, graphic_design and more —
+     a school gradebook is not PHI. Terms are also weighted: a single ambiguous
+     word no longer blocks a file on its own. */
+
+  // Unambiguous clinical identifiers — one of these is enough to block.
+  const HEALTH_STRONG = [
+    'icd-?9', 'icd-?10', 'icd-?11', 'cpt code', 'hcpcs', 'snomed', 'npi number',
+    'medical record (number|no|#)?', 'mrn', 'patients?', 'patient (name|id|identifier)',
+    'protected health information', 'phi', 'ephi',
+    'discharge summary', 'physician note', 'clinical note',
+    'health plan beneficiary', 'treatment plan', 'lab result',
+    'prescription', 'dosage', 'medication',
+  ];
+  // Softer clinical words — need two or more before blocking, because schools,
+  // HR systems and insurers legitimately use them in isolation.
+  const HEALTH_WEAK = [
+    'diagnosis', 'diagnoses', 'symptom', 'blood pressure', 'cholesterol',
+    'immunization', 'immunisation', 'vaccination', 'clinical', 'hospital',
+    'admission date', 'discharge', 'allergy', 'allergies', 'insulin',
+    'bmi', 'systolic', 'diastolic',
+  ];
+  // Contexts that are routinely non-clinical, used to discount weak hits.
+  const EDU_CONTEXT = /\b(student|pupil|grade|gpa|semester|teacher|classroom|homeroom|attendance|enrol|course|school|district|transcript|iep|504)\b/i;
+
+  const NEGATION = /\b(no phi|no-phi|nophi|de-?identified|deidentified|synthetic|anonymi[sz]ed|test data|dummy data|sample data|not phi|contains no phi|phi[- ]free)\b/i;
+
+  const wordRe = (term) => new RegExp(`(^|[^a-z0-9])(${term})([^a-z0-9]|$)`, 'i');
 
   function healthScan(columns, rows) {
-    const headerHay = columns.join(' | ').toLowerCase();
-    const sampleHay = rows.slice(0, 40).map((r) => Object.values(r).join(' ')).join(' ').toLowerCase();
-    if (NEGATION.test(headerHay + ' ' + sampleHay)) return { blocked: false, override: true };
-    const hits = HEALTH_TERMS.filter((t) => headerHay.includes(t));
-    // body matches only count for the strongest terms, to cut false positives
-    const strong = ['icd-10', 'icd10', 'medical record', 'mrn', 'diagnosis'];
-    const bodyHits = strong.filter((t) => sampleHay.includes(t));
-    const all = [...new Set([...hits, ...bodyHits])];
-    return { blocked: all.length > 0, terms: all };
+    const headerHay = columns.join(' | ');
+    // Scan the WHOLE file for a declaration, not just the first rows — a note
+    // placed in a trailing row or a far column used to be missed entirely.
+    const allText = rows.map((r) => Object.values(r).join(' ')).join(' ');
+    const declHay = headerHay + ' ' + allText;
+    if (NEGATION.test(declHay)) return { blocked: false, override: true };
+
+    const bodySample = rows.slice(0, 60).map((r) => Object.values(r).join(' ')).join(' ');
+
+    const strongHits = HEALTH_STRONG.filter((t) => wordRe(t).test(headerHay) || wordRe(t).test(bodySample));
+    const weakHits = HEALTH_WEAK.filter((t) => wordRe(t).test(headerHay));
+    const eduContext = EDU_CONTEXT.test(headerHay);
+
+    // Block on any strong identifier, or on 2+ weak clinical terms.
+    // In an obvious education context, require 3+ weak terms.
+    const weakNeeded = eduContext ? 3 : 2;
+    const blocked = strongHits.length > 0 || weakHits.length >= weakNeeded;
+    const terms = [...new Set([...strongHits, ...weakHits])].map((t) => t.replace(/[-?()]/g, (m) => (m === '?' ? '' : m)));
+    return {
+      blocked,
+      terms,
+      strong: strongHits.length,
+      weak: weakHits.length,
+      eduContext,
+    };
   }
 
   global.PrismaParse = { parseFile, parseText, parseDelimited, sniffDelimiter, healthScan, toObjects };

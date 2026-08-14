@@ -126,8 +126,16 @@ const fs = require('fs');
   await p4.goto(file);
   await p4.setInputFiles('#fileInput', phiPath);
   await p4.waitForTimeout(900);
-  const phiBlocked = await p4.evaluate(() => document.body.innerText.includes('Health data not supported'));
-  console.log('PHI blocked:', phiBlocked);
+  // Guard must intercept AND require an explicit attestation before proceeding:
+  // the proceed button starts disabled and no data reaches the analyser.
+  const phiState = await p4.evaluate(() => ({
+    intercepted: document.body.innerText.includes('looks like health data'),
+    hasAttestation: !!document.getElementById('attestBox'),
+    proceedDisabled: !!(document.getElementById('hbProceed') || {}).disabled,
+    noDatasetLoaded: !window.PrismaApp.STATE.dataset,
+  }));
+  const phiBlocked = phiState.intercepted && phiState.hasAttestation && phiState.proceedDisabled && phiState.noDatasetLoaded;
+  console.log('PHI gated:', JSON.stringify(phiState));
   await p4.screenshot({ path: path.join(outDir, 'phi-block.png') });
 
   fs.unlinkSync(csvPath); fs.unlinkSync(phiPath);
@@ -142,7 +150,7 @@ const fs = require('fs');
   if (tabInfo.drivers.svgs < 3) fails.push('drivers missing charts');
   if (tabInfo.columns.svgs < 10) fails.push('columns missing charts: ' + tabInfo.columns.svgs);
   if (timeInfo.svgs < 2 || timeInfo.empties) fails.push('sales time tab weak');
-  if (!phiBlocked) fails.push('PHI not blocked');
+  if (!phiBlocked) fails.push('PHI not gated behind attestation: ' + JSON.stringify(phiState));
   if (!scatterOk) fails.push('scatter did not render');
   if (errors.length) fails.push(...errors);
   console.log(fails.length ? '\nFAILURES:\n' + fails.join('\n') : '\nUI: all checks passed.');
