@@ -189,7 +189,7 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
 .typesel{font-size:11.5px;padding:4px 7px;border-radius:6px}
 
 /* busy + toast */
-.busy{position:fixed;inset:0;background:rgba(16,24,40,.45);backdrop-filter:blur(2px);display:none;place-items:center;z-index:120}
+.busy{position:fixed;inset:0;background:rgba(16,24,40,.45);backdrop-filter:blur(2px);display:none;align-items:center;justify-content:center;z-index:120;padding:24px}
 .busybox{background:var(--surface);border-radius:14px;padding:26px 34px;text-align:center;box-shadow:var(--shadow)}
 .spin{width:34px;height:34px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;margin:0 auto 12px;animation:sp .8s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}

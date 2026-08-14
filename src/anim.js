@@ -146,7 +146,7 @@
           rearm(t);
         }
       });
-    }, { rootMargin: '0px 0px -5% 0px', threshold: 0.05 });
+    }, { rootMargin: '0px 0px 25% 0px', threshold: 0.01 });
     return observer;
   }
 
@@ -171,7 +171,8 @@
       if (!isLaidOut(node)) return;
       const r = node.getBoundingClientRect();
       const onScreen = r.top < innerHeight && r.bottom > 0;
-      if (onScreen && node.dataset.revealed !== '1') revealCard(node);
+      const nearly = r.top < innerHeight * 1.35 && r.bottom > -innerHeight * 0.2;
+      if (nearly && node.dataset.revealed !== '1') revealCard(node);
     });
     document.querySelectorAll('svg.chart[data-anim-armed="1"]').forEach((svg) => {
       if (!isLaidOut(svg)) return;
@@ -227,7 +228,9 @@
     cards.forEach((c) => {
       if (!isLaidOut(c)) return;
       const r = c.getBoundingClientRect();
-      const onScreen = r.top < innerHeight && r.bottom > 0;
+      // Treat "just below the fold" as on-screen. A tall card whose top sits a
+      // little past the viewport would otherwise leave the tab looking blank.
+      const onScreen = r.top < innerHeight * 1.35 && r.bottom > -innerHeight * 0.2;
       if (c.dataset.revealArmed !== '1') {
         c.dataset.revealArmed = '1';
         obs.observe(c);
@@ -243,7 +246,7 @@
         obs.observe(sv);
       }
       const r = sv.getBoundingClientRect();
-      if (r.top < innerHeight && r.bottom > 0) animateSvg(sv);
+      if (r.top < innerHeight * 1.35 && r.bottom > -innerHeight * 0.2) animateSvg(sv);
     });
     scheduleSweep();
   }

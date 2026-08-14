@@ -320,6 +320,16 @@
     return `<nav class="tabs">${TABS.map(([id, label], i) => `<button class="tab${i === 0 ? ' active' : ''}" data-tab="${id}">${label}</button>`).join('')}</nav>`;
   }
 
+  // Put the tab strip just under the sticky header so the active pane's own
+  // content is the first thing visible.
+  function scrollToTabs() {
+    const tabs = $('.tabs'), bar = $('.appbar');
+    if (!tabs) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+    const barH = bar ? bar.getBoundingClientRect().height : 0;
+    const y = window.scrollY + tabs.getBoundingClientRect().top - barH;
+    window.scrollTo({ top: Math.max(0, Math.round(y)), behavior: 'smooth' });
+  }
+
   function renderKpiStrip(a) {
     const cards = [];
     cards.push({ label: 'Rows analysed', value: a.rows.length.toLocaleString(), sub: `${a.columns.length} columns` });
@@ -864,7 +874,10 @@
       const pane = el('tab-' + t.dataset.tab);
       pane.classList.add('active');
       if (t.dataset.tab === 'explore') { drawExplore(); if (el('scX')) drawScatter(); }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      // Scroll to the tab strip, not the very top. Jumping to 0 left the
+      // summary + KPI block filling the viewport, so the tab's own content
+      // started ~1400px down and the pane looked blank until you scrolled.
+      scrollToTabs();
       // swapTab defers observe() to the next frame, once the pane has layout
       if (global.PrismaAnim) global.PrismaAnim.swapTab(pane);
     }));

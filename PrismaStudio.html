@@ -197,7 +197,7 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
 .typesel{font-size:11.5px;padding:4px 7px;border-radius:6px}
 
 /* busy + toast */
-.busy{position:fixed;inset:0;background:rgba(16,24,40,.45);backdrop-filter:blur(2px);display:none;place-items:center;z-index:120}
+.busy{position:fixed;inset:0;background:rgba(16,24,40,.45);backdrop-filter:blur(2px);display:none;align-items:center;justify-content:center;z-index:120;padding:24px}
 .busybox{background:var(--surface);border-radius:14px;padding:26px 34px;text-align:center;box-shadow:var(--shadow)}
 .spin{width:34px;height:34px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;margin:0 auto 12px;animation:sp .8s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
@@ -437,7 +437,7 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
           rearm(t);
         }
       });
-    }, { rootMargin: '0px 0px -5% 0px', threshold: 0.05 });
+    }, { rootMargin: '0px 0px 25% 0px', threshold: 0.01 });
     return observer;
   }
 
@@ -462,7 +462,8 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
       if (!isLaidOut(node)) return;
       const r = node.getBoundingClientRect();
       const onScreen = r.top < innerHeight && r.bottom > 0;
-      if (onScreen && node.dataset.revealed !== '1') revealCard(node);
+      const nearly = r.top < innerHeight * 1.35 && r.bottom > -innerHeight * 0.2;
+      if (nearly && node.dataset.revealed !== '1') revealCard(node);
     });
     document.querySelectorAll('svg.chart[data-anim-armed="1"]').forEach((svg) => {
       if (!isLaidOut(svg)) return;
@@ -518,7 +519,9 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
     cards.forEach((c) => {
       if (!isLaidOut(c)) return;
       const r = c.getBoundingClientRect();
-      const onScreen = r.top < innerHeight && r.bottom > 0;
+      // Treat "just below the fold" as on-screen. A tall card whose top sits a
+      // little past the viewport would otherwise leave the tab looking blank.
+      const onScreen = r.top < innerHeight * 1.35 && r.bottom > -innerHeight * 0.2;
       if (c.dataset.revealArmed !== '1') {
         c.dataset.revealArmed = '1';
         obs.observe(c);
@@ -534,7 +537,7 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
         obs.observe(sv);
       }
       const r = sv.getBoundingClientRect();
-      if (r.top < innerHeight && r.bottom > 0) animateSvg(sv);
+      if (r.top < innerHeight * 1.35 && r.bottom > -innerHeight * 0.2) animateSvg(sv);
     });
     scheduleSweep();
   }
@@ -2741,6 +2744,16 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
     return `<nav class="tabs">${TABS.map(([id, label], i) => `<button class="tab${i === 0 ? ' active' : ''}" data-tab="${id}">${label}</button>`).join('')}</nav>`;
   }
 
+  // Put the tab strip just under the sticky header so the active pane's own
+  // content is the first thing visible.
+  function scrollToTabs() {
+    const tabs = $('.tabs'), bar = $('.appbar');
+    if (!tabs) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+    const barH = bar ? bar.getBoundingClientRect().height : 0;
+    const y = window.scrollY + tabs.getBoundingClientRect().top - barH;
+    window.scrollTo({ top: Math.max(0, Math.round(y)), behavior: 'smooth' });
+  }
+
   function renderKpiStrip(a) {
     const cards = [];
     cards.push({ label: 'Rows analysed', value: a.rows.length.toLocaleString(), sub: `${a.columns.length} columns` });
@@ -3285,7 +3298,10 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
       const pane = el('tab-' + t.dataset.tab);
       pane.classList.add('active');
       if (t.dataset.tab === 'explore') { drawExplore(); if (el('scX')) drawScatter(); }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      // Scroll to the tab strip, not the very top. Jumping to 0 left the
+      // summary + KPI block filling the viewport, so the tab's own content
+      // started ~1400px down and the pane looked blank until you scrolled.
+      scrollToTabs();
       // swapTab defers observe() to the next frame, once the pane has layout
       if (global.PrismaAnim) global.PrismaAnim.swapTab(pane);
     }));
