@@ -260,7 +260,8 @@
     window.scrollTo(0, 0);
     if (global.PrismaAnim) {
       global.PrismaAnim.enterDashboard(root);
-      global.PrismaAnim.observe(el('tab-findings'));
+      // wait a frame so the freshly-injected pane has real dimensions
+      requestAnimationFrame(() => global.PrismaAnim.observe(el('tab-findings')));
       animateKpis();
     }
   }
@@ -644,10 +645,8 @@
       pane.classList.add('active');
       if (t.dataset.tab === 'explore') { drawExplore(); if (el('scX')) drawScatter(); }
       window.scrollTo({ top: 0, behavior: 'smooth' });
-      if (global.PrismaAnim) {
-        global.PrismaAnim.swapTab(pane);
-        global.PrismaAnim.observe(pane);
-      }
+      // swapTab defers observe() to the next frame, once the pane has layout
+      if (global.PrismaAnim) global.PrismaAnim.swapTab(pane);
     }));
     ['pvRow', 'pvCol', 'pvMetric', 'pvAgg'].forEach((id) => { const e = el(id); if (e) e.addEventListener('change', drawPivot); });
     ['exMetric', 'exGroup', 'exSort'].forEach((id) => { const e = el(id); if (e) e.addEventListener('change', drawExplore); });

@@ -129,38 +129,110 @@
     if (observer || !('IntersectionObserver' in global)) return observer;
     observer = new IntersectionObserver((entries) => {
       entries.forEach((e) => {
-        if (!e.isIntersecting) return;
         const t = e.target;
+        // Reveal when intersecting OR once the element has been scrolled past.
+        // A fast jump (End key, scrollTo bottom, anchor link) can skip an
+        // element entirely without ever reporting isIntersecting — without this
+        // the content would stay at opacity:0 permanently.
+        const passed = !e.isIntersecting && e.boundingClientRect.bottom <= 0;
+        if (!e.isIntersecting && !passed) return;
         observer.unobserve(t);
         if (t.tagName.toLowerCase() === 'svg') animateSvg(t);
-        else revealCard(t);
+        else revealCard(t, passed);
       });
     }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
     return observer;
   }
 
-  function revealCard(node) {
+  // Safety net: nothing primed for reveal may stay invisible. Runs on scroll
+  // end and window resize, and catches anything the observer missed.
+  function sweep() {
+    if (!gsap || REDUCED) return;
+    document.querySelectorAll('[data-reveal-pending="1"]').forEach((node) => {
+      const r = node.getBoundingClientRect();
+      // Scrolled past without ever intersecting (fast jump): show it instantly.
+      if (r.bottom <= 0) { revealCard(node, true); return; }
+      // Near or inside the viewport: animate it in.
+      if (r.top < innerHeight * 1.25) revealCard(node);
+    });
+  }
+  let sweepTimer = null;
+  function scheduleSweep() {
+    clearTimeout(sweepTimer);
+    sweepTimer = setTimeout(sweep, 120);
+  }
+  if (typeof addEventListener === 'function') {
+    addEventListener('scroll', scheduleSweep, { passive: true });
+    addEventListener('resize', scheduleSweep, { passive: true });
+  }
+
+  // `instant` skips the transition for elements the user scrolled straight past
+  // — animating them would be pointless motion for content already behind them.
+  function revealCard(node, instant) {
     if (!gsap || REDUCED || node.dataset.revealed === '1') return;
     node.dataset.revealed = '1';
+    delete node.dataset.revealPending;
+    if (instant) { gsap.set(node, { opacity: 1, y: 0, clearProps: 'transform' }); return; }
     gsap.fromTo(node, { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: EASE_OUT });
   }
 
   /* ---------- public API ---------- */
   // Register everything inside a container for scroll-reveal.
+  // True only when the element actually occupies space. Elements inside a
+  // display:none tab pane have zero dimensions, and IntersectionObserver will
+  // never report them as intersecting — so we must not hand them to the
+  // observer or prime them to opacity:0, or they stay invisible/static forever.
+  function isLaidOut(node) {
+    return !!(node.getClientRects().length && node.getBoundingClientRect().width > 0);
+  }
+
   function observe(root) {
-    const obs = ensureObserver();
     if (!gsap || REDUCED) return;
-    const svgs = root.querySelectorAll('svg.chart:not([data-animated="1"])');
-    const cards = root.querySelectorAll('.card:not([data-revealed="1"]), .finding:not([data-revealed="1"]), .subcard:not([data-revealed="1"]), .kpi:not([data-revealed="1"])');
+    // A hidden pane can't be measured yet. Defer until it's displayed.
+    if (root !== document && root.nodeType === 1 && !isLaidOut(root)) {
+      root.dataset.animPending = '1';
+      return;
+    }
+    delete root.dataset.animPending;
+    const obs = ensureObserver();
+    const svgs = [...root.querySelectorAll('svg.chart:not([data-animated="1"])')];
+    const cards = [...root.querySelectorAll('.card:not([data-revealed="1"]), .finding:not([data-revealed="1"]), .subcard:not([data-revealed="1"]), .kpi:not([data-revealed="1"])')];
     if (!obs) { svgs.forEach(animateSvg); return; }
-    cards.forEach((c) => { gsap.set(c, { opacity: 0 }); obs.observe(c); });
-    svgs.forEach((s) => obs.observe(s));
+
+    cards.forEach((c) => {
+      if (!isLaidOut(c)) return;               // never hide what we can't reveal
+      const r = c.getBoundingClientRect();
+      // Already on screen, or already scrolled past? Show it now — don't hide
+      // content the user can see (or has passed) just to animate it later.
+      if (r.top < innerHeight && r.bottom > 0) { revealCard(c); return; }
+      if (r.bottom <= 0) { c.dataset.revealed = '1'; return; }
+      gsap.set(c, { opacity: 0 });
+      c.dataset.revealPending = '1';
+      obs.observe(c);
+    });
+    svgs.forEach((s) => {
+      if (!isLaidOut(s)) { animateSvg(s); return; } // fall back to immediate play
+      const r = s.getBoundingClientRect();
+      // On screen now? Play immediately — IO can be a frame late and reads as stale.
+      if (r.top < innerHeight && r.bottom > 0) { animateSvg(s); return; }
+      // Scrolled PAST (above the viewport) happens right after a tab switch,
+      // before the smooth scroll-to-top lands. The observer would never fire
+      // for these, so play them too rather than leaving them frozen.
+      if (r.bottom <= 0) { animateSvg(s); return; }
+      obs.observe(s);
+    });
   }
 
   // Force-animate a freshly rendered container (e.g. after a control change).
+  // Waits one frame so the new markup has been laid out before we measure it.
   function play(root) {
-    if (!gsap || REDUCED) return;
-    root.querySelectorAll('svg.chart').forEach((s) => { s.dataset.animated = ''; animateSvg(s); });
+    if (!gsap || REDUCED || !root) return;
+    requestAnimationFrame(() => {
+      root.querySelectorAll('svg.chart').forEach((s) => {
+        s.dataset.animated = '';
+        animateSvg(s);
+      });
+    });
   }
 
   // Count-up for KPI numbers.
@@ -173,10 +245,12 @@
     });
   }
 
-  // Tab switch transition.
+  // Tab switch transition. The pane has only just become visible, so wait one
+  // frame for layout before measuring anything for the reveal.
   function swapTab(pane) {
     if (!gsap || REDUCED) return;
     gsap.fromTo(pane, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.4, ease: EASE_OUT });
+    requestAnimationFrame(() => observe(pane));
   }
 
   // Dashboard entrance.
