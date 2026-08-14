@@ -77,8 +77,12 @@
         break;
       }
       case 'scatter': {
+        // One path holds every point, so this is a single tween rather than
+        // one per marker — keeps the Explore tab responsive on large files.
+        const cloud = svg.querySelector('path[data-pts]');
+        if (cloud) tl.from(cloud, { opacity: 0, scale: 0.94, transformOrigin: '50% 50%', duration: 0.55 });
         const pts = svg.querySelectorAll('circle[data-pt]');
-        tl.from(pts, { scale: 0, opacity: 0, transformOrigin: '50% 50%', duration: 0.5, stagger: { each: 0.004, from: 'random' } });
+        if (pts.length) tl.from(pts, { scale: 0, opacity: 0, transformOrigin: '50% 50%', duration: 0.5, stagger: { each: 0.004, from: 'random' } }, 0);
         const fit = svg.querySelector('[data-fit]');
         if (fit) {
           const len = fit.getTotalLength ? fit.getTotalLength() : 600;
@@ -118,7 +122,7 @@
     if (svg.querySelector('[data-slice]')) return 'donut';
     if (svg.querySelector('[data-cell]')) return 'heatmap';
     if (svg.querySelector('[data-line]')) return 'line';
-    if (svg.querySelector('[data-pt]')) return 'scatter';
+    if (svg.querySelector('[data-pt],[data-pts]')) return 'scatter';
     if (svg.querySelector('[data-bar]')) return 'barH';
     return 'fade';
   }

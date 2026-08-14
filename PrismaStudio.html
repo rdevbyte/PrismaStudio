@@ -362,8 +362,12 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
         break;
       }
       case 'scatter': {
+        // One path holds every point, so this is a single tween rather than
+        // one per marker — keeps the Explore tab responsive on large files.
+        const cloud = svg.querySelector('path[data-pts]');
+        if (cloud) tl.from(cloud, { opacity: 0, scale: 0.94, transformOrigin: '50% 50%', duration: 0.55 });
         const pts = svg.querySelectorAll('circle[data-pt]');
-        tl.from(pts, { scale: 0, opacity: 0, transformOrigin: '50% 50%', duration: 0.5, stagger: { each: 0.004, from: 'random' } });
+        if (pts.length) tl.from(pts, { scale: 0, opacity: 0, transformOrigin: '50% 50%', duration: 0.5, stagger: { each: 0.004, from: 'random' } }, 0);
         const fit = svg.querySelector('[data-fit]');
         if (fit) {
           const len = fit.getTotalLength ? fit.getTotalLength() : 600;
@@ -403,7 +407,7 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
     if (svg.querySelector('[data-slice]')) return 'donut';
     if (svg.querySelector('[data-cell]')) return 'heatmap';
     if (svg.querySelector('[data-line]')) return 'line';
-    if (svg.querySelector('[data-pt]')) return 'scatter';
+    if (svg.querySelector('[data-pt],[data-pts]')) return 'scatter';
     if (svg.querySelector('[data-bar]')) return 'barH';
     return 'fade';
   }
@@ -1857,13 +1861,26 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
     let s = `<svg viewBox="0 0 ${w} ${h}" class="chart" data-anim="scatter">`;
     niceTicks(ymin, ymax, 4).forEach((t) => { s += `<line x1="${padL}" y1="${Y(t).toFixed(1)}" x2="${w - padR}" y2="${Y(t).toFixed(1)}" class="grid"/><text x="${padL - 6}" y="${(Y(t) + 4).toFixed(1)}" class="tick end">${esc(A.fmtNum(t, { currency: opts.yCurrency }))}</text>`; });
     niceTicks(xmin, xmax, 4).forEach((t) => { s += `<text x="${X(t).toFixed(1)}" y="${h - padB + 16}" class="tick mid">${esc(A.fmtNum(t, { currency: opts.xCurrency }))}</text>`; });
-    const step = xs.length > 3000 ? Math.ceil(xs.length / 3000) : 1;
+    // Points are drawn as a single <path> of tiny arcs rather than N <circle>
+    // nodes. 900 circles cost ~250KB of DOM and 900 GSAP tweens; one path is a
+    // few KB and animates as one object, which is what made this tab sluggish.
+    // Cap the plotted sample so huge files stay interactive.
+    const CAP = 2000;
+    const step = xs.length > CAP ? Math.ceil(xs.length / CAP) : 1;
+    const r = 2.6;
+    let d = '';
+    let plotted = 0;
     for (let i = 0; i < xs.length; i += step) {
-      s += `<circle data-pt="1" cx="${X(xs[i]).toFixed(1)}" cy="${Y(ys[i]).toFixed(1)}" r="2.6" fill="var(--c1)" opacity="0.45"/>`;
+      const cx = +X(xs[i]).toFixed(1), cy = +Y(ys[i]).toFixed(1);
+      // two half-arcs = a full dot, in path syntax
+      d += `M${cx - r} ${cy}a${r} ${r} 0 1 0 ${r * 2} 0a${r} ${r} 0 1 0 ${-r * 2} 0`;
+      plotted++;
     }
+    s += `<path data-pts="1" d="${d}" fill="var(--c1)" opacity="0.45"/>`;
     const fit = A.linreg(xs, ys);
     s += `<line data-fit="1" x1="${X(xmin).toFixed(1)}" y1="${Y(fit.slope * xmin + fit.intercept).toFixed(1)}" x2="${X(xmax).toFixed(1)}" y2="${Y(fit.slope * xmax + fit.intercept).toFixed(1)}" class="fitline"/>`;
     s += `<text x="${w - padR}" y="${padT + 10}" class="tick end">R² = ${fit.r2.toFixed(2)}</text>`;
+    if (step > 1) s += `<text x="${w - padR}" y="${padT + 24}" class="tick end">showing ${plotted.toLocaleString()} of ${xs.length.toLocaleString()} points</text>`;
     s += `<line x1="${padL}" y1="${h - padB}" x2="${w - padR}" y2="${h - padB}" class="axis"/><line x1="${padL}" y1="${padT}" x2="${padL}" y2="${h - padB}" class="axis"/>`;
     if (opts.xLabel) s += `<text x="${(w / 2).toFixed(0)}" y="${h - 4}" class="axlbl mid">${esc(opts.xLabel)}</text>`;
     if (opts.yLabel) s += `<text transform="translate(12 ${(h / 2).toFixed(0)}) rotate(-90)" class="axlbl mid">${esc(opts.yLabel)}</text>`;
@@ -1906,45 +1923,46 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
   // Approximate text width in px for a given font-size (avg glyph ratio ~0.56 for Inter/system UI).
   const textW = (str, fontPx) => String(str).length * fontPx * 0.56;
 
-  /* ---------- heatmap / pivot ----------
-     Rendered at true pixel scale (width=w, height=h attributes, not just a
-     viewBox) so labels are never magnified by CSS stretching. Column headers
-     are laid out horizontally when they fit and only rotate when they must,
-     with the top pad measured from the actual longest label. */
+  /* Rendered at true pixel scale so labels are never magnified by CSS stretching.
+     Columns expand to fill the available container width. Rotated headers get a
+     top pad derived from real trigonometry (label length x sin(angle)) plus the
+     descender, so they can never bleed into the first row of cells. */
   function heatmap(ct, opts = {}) {
     const MAXR = 16, MAXC = 16;
     const rowKeys = ct.rowKeys.slice(0, MAXR), colKeys = ct.colKeys.slice(0, MAXC);
     if (!rowKeys.length || !colKeys.length) return '<p class="empty">Not enough data to build a cross-tab.</p>';
 
-    const FS_LBL = 11.5, FS_CELL = 11.5;
-    const rowTrunc = 24, colTrunc = 18;
-    const rowLabels = rowKeys.map((r) => trunc(r, rowTrunc));
-    const colLabels = colKeys.map((c) => trunc(c, colTrunc));
+    const FS_LBL = 12, FS_CELL = 12;
+    const rowLabels = rowKeys.map((r) => trunc(r, 26));
+    const colLabels = colKeys.map((c) => trunc(c, 22));
 
-    // cell width must fit the widest value it will contain
     const vals = [];
     rowKeys.forEach((_, i) => colKeys.forEach((__, j) => {
       const v = ct.matrix[i][j]; if (v != null && isFinite(v)) vals.push(v);
     }));
-    const valStrings = vals.map((v) => A.fmtNum(v, opts));
-    const widestVal = valStrings.reduce((a, b) => (b.length > a.length ? b : a), '0');
-    const minCellW = Math.ceil(textW(widestVal, FS_CELL)) + 18;
+    if (!vals.length) return '<p class="empty">No values to cross-tabulate for this combination.</p>';
 
-    // horizontal headers if every label fits inside a cell; else rotate 40°
+    const widestVal = vals.map((v) => A.fmtNum(v, opts)).reduce((a, b) => (b.length > a.length ? b : a), '0');
+    const minCellW = Math.ceil(textW(widestVal, FS_CELL)) + 22;
+
     const widestColLabel = colLabels.reduce((a, b) => (b.length > a.length ? b : a), '');
-    const flatNeed = Math.ceil(textW(widestColLabel, FS_LBL)) + 12;
-    let cellW = Math.max(minCellW, 62);
-    const horizontal = flatNeed <= Math.max(cellW, 96);
-    if (horizontal) cellW = Math.max(cellW, flatNeed);
+    const colLabelPx = textW(widestColLabel, FS_LBL);
+    const padL = Math.min(240, Math.ceil(textW(rowLabels.reduce((a, b) => (b.length > a.length ? b : a), ''), FS_LBL)) + 18);
 
-    const ROT = 40, rad = (ROT * Math.PI) / 180;
-    const padT = horizontal
-      ? 26
-      : Math.min(150, Math.ceil(textW(widestColLabel, FS_LBL) * Math.sin(rad)) + 20);
-    const padL = Math.min(230, Math.ceil(textW(
-      rowLabels.reduce((a, b) => (b.length > a.length ? b : a), ''), FS_LBL)) + 16);
+    // Available width inside the card (set by the caller); grow cells to fill it.
+    const avail = Math.max(320, (opts.maxWidth || 900) - padL - 14);
+    const fitCellW = Math.floor(avail / colKeys.length);
 
-    const cellH = 30, gap = 3, padR = 12, padB = 10;
+    // Headers stay horizontal whenever the label fits in the cell it labels.
+    let cellW = Math.max(minCellW, Math.min(fitCellW, 260));
+    const horizontal = colLabelPx + 14 <= cellW;
+    if (!horizontal) cellW = Math.max(cellW, minCellW);
+
+    const ROT = 45, rad = (ROT * Math.PI) / 180;
+    // Vertical space a rotated label truly occupies, + font descender + breathing room.
+    const padT = horizontal ? 30 : Math.min(190, Math.ceil(colLabelPx * Math.sin(rad)) + FS_LBL + 14);
+
+    const cellH = 32, gap = 3, padR = 14, padB = 12;
     const w = padL + colKeys.length * cellW + padR;
     const h = padT + rowKeys.length * cellH + padB;
 
@@ -1953,17 +1971,20 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
 
     let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" class="chart pivot" data-anim="heatmap" style="max-width:none">`;
 
-    // column headers
     colLabels.forEach((c, j) => {
       const cx = padL + j * cellW + cellW / 2;
-      s += horizontal
-        ? `<text x="${cx.toFixed(1)}" y="${padT - 9}" class="lbl mid">${esc(c)}</text>`
-        : `<text transform="translate(${(cx + 4).toFixed(1)} ${padT - 8}) rotate(-${ROT})" class="lbl end">${esc(c)}</text>`;
+      if (horizontal) {
+        s += `<text x="${cx.toFixed(1)}" y="${padT - 11}" class="lbl mid">${esc(c)}</text>`;
+      } else {
+        // Anchor the label's END at the top-centre of its column, rotated up-left.
+        // Sitting 8px above the grid guarantees clearance for the whole glyph run.
+        s += `<text transform="translate(${cx.toFixed(1)} ${(padT - 9).toFixed(1)}) rotate(-${ROT})" class="lbl end">${esc(c)}</text>`;
+      }
     });
 
     rowKeys.forEach((r, i) => {
       const cy = padT + i * cellH;
-      s += `<text x="${padL - 9}" y="${(cy + cellH / 2 + 4).toFixed(1)}" class="lbl end">${esc(rowLabels[i])}</text>`;
+      s += `<text x="${padL - 10}" y="${(cy + cellH / 2 + 4).toFixed(1)}" class="lbl end">${esc(rowLabels[i])}</text>`;
       colKeys.forEach((c, j) => {
         const v = ct.matrix[i][j];
         const x = padL + j * cellW, y = cy;
@@ -1975,7 +1996,7 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
         const tv = t(v);
         const label = A.fmtNum(v, opts);
         s += `<g class="pcell"><rect x="${x}" y="${y}" width="${cw}" height="${ch}" rx="4" fill="var(--c1)" opacity="${(0.12 + tv * 0.8).toFixed(2)}" data-cell="1">` +
-          `<title>${esc(r)} × ${esc(c)}: ${esc(label)}</title></rect>` +
+          `<title>${esc(r)} \u00d7 ${esc(c)}: ${esc(label)}</title></rect>` +
           `<text x="${(x + cw / 2).toFixed(1)}" y="${(y + ch / 2 + 4).toFixed(1)}" class="cellv mid" fill="${tv > 0.55 ? '#fff' : 'var(--text)'}" style="pointer-events:none">${esc(label)}</text></g>`;
       });
     });
@@ -2620,8 +2641,8 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
 
   const TABS = [
     ['findings', '💡 Findings'], ['drivers', '🎯 Drivers'], ['relations', '🔗 Relationships'],
-    ['segments', '🧭 Segments'], ['columns', '📚 Column profiles'], ['time', '📈 Trends'],
-    ['quality', '🧪 Data quality'], ['explore', '🔬 Explore'], ['data', '🗂 Data'],
+    ['segments', '🧭 Segments'], ['columns', '📚 Column Profiles'], ['time', '📈 Trends'],
+    ['quality', '🧪 Data Quality'], ['explore', '🔬 Explore'], ['data', '🗂 Data'],
   ];
   function renderNav() {
     return `<nav class="tabs">${TABS.map(([id, label], i) => `<button class="tab${i === 0 ? ' active' : ''}" data-tab="${id}">${label}</button>`).join('')}</nav>`;
@@ -2822,7 +2843,7 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
           <label>Metric <select id="pvMetric"><option value="">(row count)</option>${a.numCols.map((c) => `<option${c === a.primaryMetric ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
           <label>Aggregate <select id="pvAgg"><option value="mean">mean</option><option value="sum">sum</option><option value="count">count</option></select></label>
         </div>
-        <div class="scrollx" id="pivotOut">${C.heatmap(ct, { currency: isCur })}</div></section>`;
+        <div class="scrollx" id="pivotOut">${C.heatmap(ct, { currency: isCur, maxWidth: pivotWidth() })}</div></section>`;
     }
     return html;
   }
@@ -2869,10 +2890,7 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
 
   /* ---------- time ---------- */
   function renderTime(a) {
-    if (!a.series) {
-      return `<section class="card"><div class="sechead"><span class="sicon">📈</span><h2>Trends & projection</h2></div>
-        <p class="empty">No usable date column was found alongside a numeric metric, so time-series analysis is skipped. ${a.dateCols.length ? '' : 'If one of your columns holds dates, set its type to <b>date</b> in the preview step and re-run.'} Everything else in this report works without dates.</p></section>`;
-    }
+    if (!a.series) return renderOrderedTrends(a);
     const isCur = a.typeOf(a.primaryMetric) === 'currency';
     const ma = A.movingAverage(a.series, 7);
     const anomPts = [];
@@ -2908,6 +2926,112 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
       ${pts.slice(0, 40).map((p) => `<tr><td>${fmtDate(new Date(p.t))}</td><td class="num"><b>${fmtNum(p.value, { currency: isCur })}</b></td><td class="num dim">${fmtNum(p.lower, { currency: isCur })}</td><td class="num dim">${fmtNum(p.upper, { currency: isCur })}</td></tr>`).join('')}
       </tbody></table></div></section>`;
     return html;
+  }
+
+  // No date column: a "trend" still exists along any ordered dimension.
+  // Show how the headline metric progresses across ordinal/binned fields
+  // (age brackets, tenure, quintiles) plus a cumulative distribution — so the
+  // tab is genuinely useful for cross-sectional data instead of apologising.
+  function renderOrderedTrends(a) {
+    const metric = a.primaryMetric;
+    if (!metric) {
+      return `<section class="card"><div class="sechead"><span class="sicon">📈</span><h2>Trends</h2></div>
+        <p class="empty">Trend analysis needs a numeric metric. This dataset has no numeric column that varies, so there is nothing to trend.</p></section>`;
+    }
+    const isCur = a.typeOf(metric) === 'currency';
+    const p = a.byName[metric];
+
+    // Rank an ordered categorical: leading number, or a known ordinal word list.
+    const ORDINAL = ['none', 'very low', 'low', 'poor', 'fair', 'medium', 'moderate', 'average', 'good', 'high', 'very high', 'very good', 'excellent'];
+    const rankOf = (k) => {
+      const str = String(k).trim();
+      const num = /(-?\d+(?:\.\d+)?)/.exec(str.replace(/,/g, ''));
+      if (num) return parseFloat(num[1]);
+      const idx = ORDINAL.indexOf(str.toLowerCase());
+      return idx >= 0 ? idx : NaN;
+    };
+    const ordered = [];
+    // A metric's own quintile bands trivially "predict" it (R²=1.00) — that is
+    // a restatement, not a trend. Exclude the metric's own derived bins.
+    const selfBin = `${metric} (quintile)`;
+    a.catCols.filter((c) => c !== selfBin).forEach((c) => {
+      const prof = a.byName[c];
+      const levels = prof && prof.counts ? prof.counts.map(([k]) => k) : [...new Set(a.rows.map((r) => String(r[c] ?? '').trim()))].filter(Boolean);
+      if (levels.length < 3 || levels.length > 12) return;
+      const ranks = levels.map(rankOf);
+      if (ranks.some((x) => !isFinite(x))) return;           // not an ordered field
+      if (new Set(ranks).size !== ranks.length) return;
+      const groups = levels.map((k, i) => {
+        const vals = A.num(a.rows.filter((r) => String(r[c] ?? '').trim() === k).map((r) => A.parseNumberLike(r[metric])));
+        return { key: k, rank: ranks[i], n: vals.length, mean: vals.length ? A.mean(vals) : 0, median: vals.length ? A.median(vals) : 0, sum: A.sum(vals) };
+      }).filter((g) => g.n >= 3).sort((x, y) => x.rank - y.rank);
+      if (groups.length < 3) return;
+      const fit = A.linreg(groups.map((g) => g.rank), groups.map((g) => g.mean));
+      ordered.push({ col: c, groups, fit, swing: groups[groups.length - 1].mean - groups[0].mean });
+    });
+    ordered.sort((x, y) => Math.abs(y.fit.r2) - Math.abs(x.fit.r2));
+
+    let html = `<section class="card"><div class="sechead"><span class="sicon">📈</span><h2>Trends</h2><span class="dim small">no date column — showing progression across ordered fields</span></div>
+      <p class="explain">This dataset is <b>cross-sectional</b>: each row is an independent record rather than a point in time, so there is no calendar trend to plot. A trend still exists along any <i>ordered</i> dimension, so ${esc(metric)} is tracked across ranked bands below.${a.dateCols.length ? '' : ' If one of your columns does hold dates, set its type to <b>date</b> in the preview step and re-run to unlock forecasting.'}</p>`;
+
+    if (ordered.length) {
+      html += `<div class="grid2">${ordered.slice(0, 4).map((o) => `<div class="subcard">
+        <h4>${esc(metric)} across ${esc(o.col)}</h4>
+        <p class="dim small">R² = ${o.fit.r2.toFixed(2)} · ${o.fit.slope >= 0 ? 'rising' : 'falling'} · swing ${fmtNum(o.swing, { currency: isCur })}</p>
+        ${C.barH(o.groups.map((g) => ({ label: g.key, value: g.mean, sub: `n=${g.n}`, color: o.fit.slope >= 0 ? 'var(--c1)' : 'var(--c4)' })), { currency: isCur })}
+        <table class="mini"><thead><tr><th>Band</th><th class="num">n</th><th class="num">Mean</th><th class="num">Median</th><th class="num">Δ prev</th></tr></thead><tbody>
+        ${o.groups.map((g, i) => {
+          const prev = o.groups[i - 1];
+          const d = prev && prev.mean ? ((g.mean - prev.mean) / Math.abs(prev.mean)) * 100 : null;
+          return `<tr><td>${esc(trunc(g.key, 22))}</td><td class="num">${g.n}</td><td class="num">${fmtNum(g.mean, { currency: isCur })}</td><td class="num">${fmtNum(g.median, { currency: isCur })}</td><td class="num ${d == null ? '' : d >= 0 ? 'pos' : 'neg'}">${d == null ? '—' : (d >= 0 ? '+' : '') + d.toFixed(1) + '%'}</td></tr>`;
+        }).join('')}</tbody></table></div>`).join('')}</div>`;
+    } else {
+      html += `<p class="empty">No ordered categorical fields (age bands, tenure, ratings, quintiles) were detected, so there is no sequence to trend along. The <b>Drivers</b> and <b>Segments</b> tabs cover the group differences in this data.</p>`;
+    }
+    html += '</section>';
+
+    // Cumulative distribution — always available for a numeric metric.
+    if (p && p.values && p.values.length > 10) {
+      const sorted = [...p.values].sort((x, y) => x - y);
+      const pts = [];
+      const STEPS = 40;
+      for (let i = 0; i <= STEPS; i++) {
+        const q = i / STEPS;
+        pts.push({ t: q * 100, value: A.quantile(sorted, q) });
+      }
+      const decChunks = [];
+      for (let d = 0; d < 10; d++) {
+        const lo = Math.floor((d / 10) * sorted.length), hi = Math.floor(((d + 1) / 10) * sorted.length);
+        const slice = sorted.slice(lo, Math.max(hi, lo + 1));
+        decChunks.push({ label: `D${d + 1}`, value: A.sum(slice), n: slice.length });
+      }
+      const total = A.sum(sorted) || 1;
+      html += `<section class="card"><div class="sechead"><span class="sicon">📊</span><h2>Distribution curve — ${esc(metric)}</h2></div>
+        <p class="explain">The percentile curve shows the value at each point in the distribution: the steeper the right-hand tail, the more concentrated the metric is in a few large records.</p>
+        <div class="grid2">
+          <div class="subcard"><h4>Value by percentile</h4>
+            ${C.timeSeries(pts.map((q) => ({ t: q.t, value: q.value, date: new Date() })), null, null, { currency: isCur, width: 560, height: 260 })}
+            <p class="dim small">P10 ${fmtNum(A.quantile(sorted, 0.1), { currency: isCur })} · P50 ${fmtNum(p.median, { currency: isCur })} · P90 ${fmtNum(A.quantile(sorted, 0.9), { currency: isCur })}</p></div>
+          <div class="subcard"><h4>Share of total by decile</h4>
+            ${C.barH(decChunks.map((d) => ({ label: d.label, value: (d.value / total) * 100, sub: `n=${d.n}`, color: 'var(--c3)' })), {})}
+            <p class="dim small">Top decile holds ${((decChunks[9].value / total) * 100).toFixed(1)}% of all ${esc(metric)}.</p></div>
+        </div></section>`;
+    }
+    return html + renderPeriodFreeSummary(a, isCur);
+  }
+
+  // Record-count profile across the biggest categorical — a "volume" view that
+  // stands in for the records-per-period chart a dated set would get.
+  function renderPeriodFreeSummary(a, isCur) {
+    const cat = a.baseCats.find((c) => { const p = a.byName[c]; return p && p.unique >= 3 && p.unique <= 14; });
+    if (!cat) return '';
+    const pr = A.pareto(a.rows, cat, a.primaryMetric);
+    return `<section class="card"><div class="sechead"><span class="sicon">📆</span><h2>Volume profile</h2><span class="dim small">by ${esc(cat)}</span></div>
+      <p class="explain">Without dates there is no per-period volume, so this shows how records and total ${esc(a.primaryMetric)} distribute across ${esc(cat)}.</p>
+      <div class="grid2">
+        <div class="subcard"><h4>Total ${esc(a.primaryMetric)}</h4>${C.barH(pr.items.slice(0, 12).map((i) => ({ label: i.key, value: i.value, sub: i.share.toFixed(1) + '%', color: 'var(--c1)' })), { currency: isCur })}</div>
+        <div class="subcard"><h4>Share of total</h4>${C.donut(pr.items.slice(0, 8).map((i) => ({ label: i.key, value: i.value })), { currency: isCur, centerLabel: 'total', size: 200 })}</div>
+      </div></section>`;
   }
 
   // Month-by-month table + bars. Works for any dated dataset, trend or not.
@@ -3038,8 +3162,16 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
     const a = STATE.analysis;
     const r = el('pvRow').value, c = el('pvCol').value, m = el('pvMetric').value, agg = el('pvAgg').value;
     const ct = A.crossTab(a.rows, r, c, m || null, agg);
-    el('pivotOut').innerHTML = C.heatmap(ct, { currency: m && a.typeOf(m) === 'currency' });
+    el('pivotOut').innerHTML = C.heatmap(ct, { currency: m && a.typeOf(m) === 'currency', maxWidth: pivotWidth() });
     if (global.PrismaAnim) global.PrismaAnim.play(el('pivotOut'));
+  }
+
+  // Width available to the pivot. Measured from the live container when it
+  // exists, otherwise estimated from the viewport so the first paint fills too.
+  function pivotWidth() {
+    const node = el('pivotOut');
+    if (node && node.clientWidth > 200) return node.clientWidth;
+    return Math.min(1360, Math.max(360, window.innerWidth - 48)) - 44;
   }
 
   /* ---------- data tab ---------- */
@@ -3065,6 +3197,10 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
       if (global.PrismaAnim) global.PrismaAnim.swapTab(pane);
     }));
     ['pvRow', 'pvCol', 'pvMetric', 'pvAgg'].forEach((id) => { const e = el(id); if (e) e.addEventListener('change', drawPivot); });
+    if (el('pvRow')) {
+      let rt = null;
+      window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (el('pivotOut')) drawPivot(); }, 180); });
+    }
     ['exMetric', 'exGroup', 'exSort'].forEach((id) => { const e = el(id); if (e) e.addEventListener('change', drawExplore); });
     ['scX', 'scY'].forEach((id) => { const e = el(id); if (e) e.addEventListener('change', drawScatter); });
   }

@@ -104,13 +104,26 @@
     let s = `<svg viewBox="0 0 ${w} ${h}" class="chart" data-anim="scatter">`;
     niceTicks(ymin, ymax, 4).forEach((t) => { s += `<line x1="${padL}" y1="${Y(t).toFixed(1)}" x2="${w - padR}" y2="${Y(t).toFixed(1)}" class="grid"/><text x="${padL - 6}" y="${(Y(t) + 4).toFixed(1)}" class="tick end">${esc(A.fmtNum(t, { currency: opts.yCurrency }))}</text>`; });
     niceTicks(xmin, xmax, 4).forEach((t) => { s += `<text x="${X(t).toFixed(1)}" y="${h - padB + 16}" class="tick mid">${esc(A.fmtNum(t, { currency: opts.xCurrency }))}</text>`; });
-    const step = xs.length > 3000 ? Math.ceil(xs.length / 3000) : 1;
+    // Points are drawn as a single <path> of tiny arcs rather than N <circle>
+    // nodes. 900 circles cost ~250KB of DOM and 900 GSAP tweens; one path is a
+    // few KB and animates as one object, which is what made this tab sluggish.
+    // Cap the plotted sample so huge files stay interactive.
+    const CAP = 2000;
+    const step = xs.length > CAP ? Math.ceil(xs.length / CAP) : 1;
+    const r = 2.6;
+    let d = '';
+    let plotted = 0;
     for (let i = 0; i < xs.length; i += step) {
-      s += `<circle data-pt="1" cx="${X(xs[i]).toFixed(1)}" cy="${Y(ys[i]).toFixed(1)}" r="2.6" fill="var(--c1)" opacity="0.45"/>`;
+      const cx = +X(xs[i]).toFixed(1), cy = +Y(ys[i]).toFixed(1);
+      // two half-arcs = a full dot, in path syntax
+      d += `M${cx - r} ${cy}a${r} ${r} 0 1 0 ${r * 2} 0a${r} ${r} 0 1 0 ${-r * 2} 0`;
+      plotted++;
     }
+    s += `<path data-pts="1" d="${d}" fill="var(--c1)" opacity="0.45"/>`;
     const fit = A.linreg(xs, ys);
     s += `<line data-fit="1" x1="${X(xmin).toFixed(1)}" y1="${Y(fit.slope * xmin + fit.intercept).toFixed(1)}" x2="${X(xmax).toFixed(1)}" y2="${Y(fit.slope * xmax + fit.intercept).toFixed(1)}" class="fitline"/>`;
     s += `<text x="${w - padR}" y="${padT + 10}" class="tick end">R² = ${fit.r2.toFixed(2)}</text>`;
+    if (step > 1) s += `<text x="${w - padR}" y="${padT + 24}" class="tick end">showing ${plotted.toLocaleString()} of ${xs.length.toLocaleString()} points</text>`;
     s += `<line x1="${padL}" y1="${h - padB}" x2="${w - padR}" y2="${h - padB}" class="axis"/><line x1="${padL}" y1="${padT}" x2="${padL}" y2="${h - padB}" class="axis"/>`;
     if (opts.xLabel) s += `<text x="${(w / 2).toFixed(0)}" y="${h - 4}" class="axlbl mid">${esc(opts.xLabel)}</text>`;
     if (opts.yLabel) s += `<text transform="translate(12 ${(h / 2).toFixed(0)}) rotate(-90)" class="axlbl mid">${esc(opts.yLabel)}</text>`;
@@ -153,45 +166,46 @@
   // Approximate text width in px for a given font-size (avg glyph ratio ~0.56 for Inter/system UI).
   const textW = (str, fontPx) => String(str).length * fontPx * 0.56;
 
-  /* ---------- heatmap / pivot ----------
-     Rendered at true pixel scale (width=w, height=h attributes, not just a
-     viewBox) so labels are never magnified by CSS stretching. Column headers
-     are laid out horizontally when they fit and only rotate when they must,
-     with the top pad measured from the actual longest label. */
+  /* Rendered at true pixel scale so labels are never magnified by CSS stretching.
+     Columns expand to fill the available container width. Rotated headers get a
+     top pad derived from real trigonometry (label length x sin(angle)) plus the
+     descender, so they can never bleed into the first row of cells. */
   function heatmap(ct, opts = {}) {
     const MAXR = 16, MAXC = 16;
     const rowKeys = ct.rowKeys.slice(0, MAXR), colKeys = ct.colKeys.slice(0, MAXC);
     if (!rowKeys.length || !colKeys.length) return '<p class="empty">Not enough data to build a cross-tab.</p>';
 
-    const FS_LBL = 11.5, FS_CELL = 11.5;
-    const rowTrunc = 24, colTrunc = 18;
-    const rowLabels = rowKeys.map((r) => trunc(r, rowTrunc));
-    const colLabels = colKeys.map((c) => trunc(c, colTrunc));
+    const FS_LBL = 12, FS_CELL = 12;
+    const rowLabels = rowKeys.map((r) => trunc(r, 26));
+    const colLabels = colKeys.map((c) => trunc(c, 22));
 
-    // cell width must fit the widest value it will contain
     const vals = [];
     rowKeys.forEach((_, i) => colKeys.forEach((__, j) => {
       const v = ct.matrix[i][j]; if (v != null && isFinite(v)) vals.push(v);
     }));
-    const valStrings = vals.map((v) => A.fmtNum(v, opts));
-    const widestVal = valStrings.reduce((a, b) => (b.length > a.length ? b : a), '0');
-    const minCellW = Math.ceil(textW(widestVal, FS_CELL)) + 18;
+    if (!vals.length) return '<p class="empty">No values to cross-tabulate for this combination.</p>';
 
-    // horizontal headers if every label fits inside a cell; else rotate 40°
+    const widestVal = vals.map((v) => A.fmtNum(v, opts)).reduce((a, b) => (b.length > a.length ? b : a), '0');
+    const minCellW = Math.ceil(textW(widestVal, FS_CELL)) + 22;
+
     const widestColLabel = colLabels.reduce((a, b) => (b.length > a.length ? b : a), '');
-    const flatNeed = Math.ceil(textW(widestColLabel, FS_LBL)) + 12;
-    let cellW = Math.max(minCellW, 62);
-    const horizontal = flatNeed <= Math.max(cellW, 96);
-    if (horizontal) cellW = Math.max(cellW, flatNeed);
+    const colLabelPx = textW(widestColLabel, FS_LBL);
+    const padL = Math.min(240, Math.ceil(textW(rowLabels.reduce((a, b) => (b.length > a.length ? b : a), ''), FS_LBL)) + 18);
 
-    const ROT = 40, rad = (ROT * Math.PI) / 180;
-    const padT = horizontal
-      ? 26
-      : Math.min(150, Math.ceil(textW(widestColLabel, FS_LBL) * Math.sin(rad)) + 20);
-    const padL = Math.min(230, Math.ceil(textW(
-      rowLabels.reduce((a, b) => (b.length > a.length ? b : a), ''), FS_LBL)) + 16);
+    // Available width inside the card (set by the caller); grow cells to fill it.
+    const avail = Math.max(320, (opts.maxWidth || 900) - padL - 14);
+    const fitCellW = Math.floor(avail / colKeys.length);
 
-    const cellH = 30, gap = 3, padR = 12, padB = 10;
+    // Headers stay horizontal whenever the label fits in the cell it labels.
+    let cellW = Math.max(minCellW, Math.min(fitCellW, 260));
+    const horizontal = colLabelPx + 14 <= cellW;
+    if (!horizontal) cellW = Math.max(cellW, minCellW);
+
+    const ROT = 45, rad = (ROT * Math.PI) / 180;
+    // Vertical space a rotated label truly occupies, + font descender + breathing room.
+    const padT = horizontal ? 30 : Math.min(190, Math.ceil(colLabelPx * Math.sin(rad)) + FS_LBL + 14);
+
+    const cellH = 32, gap = 3, padR = 14, padB = 12;
     const w = padL + colKeys.length * cellW + padR;
     const h = padT + rowKeys.length * cellH + padB;
 
@@ -200,17 +214,20 @@
 
     let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" class="chart pivot" data-anim="heatmap" style="max-width:none">`;
 
-    // column headers
     colLabels.forEach((c, j) => {
       const cx = padL + j * cellW + cellW / 2;
-      s += horizontal
-        ? `<text x="${cx.toFixed(1)}" y="${padT - 9}" class="lbl mid">${esc(c)}</text>`
-        : `<text transform="translate(${(cx + 4).toFixed(1)} ${padT - 8}) rotate(-${ROT})" class="lbl end">${esc(c)}</text>`;
+      if (horizontal) {
+        s += `<text x="${cx.toFixed(1)}" y="${padT - 11}" class="lbl mid">${esc(c)}</text>`;
+      } else {
+        // Anchor the label's END at the top-centre of its column, rotated up-left.
+        // Sitting 8px above the grid guarantees clearance for the whole glyph run.
+        s += `<text transform="translate(${cx.toFixed(1)} ${(padT - 9).toFixed(1)}) rotate(-${ROT})" class="lbl end">${esc(c)}</text>`;
+      }
     });
 
     rowKeys.forEach((r, i) => {
       const cy = padT + i * cellH;
-      s += `<text x="${padL - 9}" y="${(cy + cellH / 2 + 4).toFixed(1)}" class="lbl end">${esc(rowLabels[i])}</text>`;
+      s += `<text x="${padL - 10}" y="${(cy + cellH / 2 + 4).toFixed(1)}" class="lbl end">${esc(rowLabels[i])}</text>`;
       colKeys.forEach((c, j) => {
         const v = ct.matrix[i][j];
         const x = padL + j * cellW, y = cy;
@@ -222,7 +239,7 @@
         const tv = t(v);
         const label = A.fmtNum(v, opts);
         s += `<g class="pcell"><rect x="${x}" y="${y}" width="${cw}" height="${ch}" rx="4" fill="var(--c1)" opacity="${(0.12 + tv * 0.8).toFixed(2)}" data-cell="1">` +
-          `<title>${esc(r)} × ${esc(c)}: ${esc(label)}</title></rect>` +
+          `<title>${esc(r)} \u00d7 ${esc(c)}: ${esc(label)}</title></rect>` +
           `<text x="${(x + cw / 2).toFixed(1)}" y="${(y + ch / 2 + 4).toFixed(1)}" class="cellv mid" fill="${tv > 0.55 ? '#fff' : 'var(--text)'}" style="pointer-events:none">${esc(label)}</text></g>`;
       });
     });

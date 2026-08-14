@@ -268,8 +268,8 @@
 
   const TABS = [
     ['findings', '💡 Findings'], ['drivers', '🎯 Drivers'], ['relations', '🔗 Relationships'],
-    ['segments', '🧭 Segments'], ['columns', '📚 Column profiles'], ['time', '📈 Trends'],
-    ['quality', '🧪 Data quality'], ['explore', '🔬 Explore'], ['data', '🗂 Data'],
+    ['segments', '🧭 Segments'], ['columns', '📚 Column Profiles'], ['time', '📈 Trends'],
+    ['quality', '🧪 Data Quality'], ['explore', '🔬 Explore'], ['data', '🗂 Data'],
   ];
   function renderNav() {
     return `<nav class="tabs">${TABS.map(([id, label], i) => `<button class="tab${i === 0 ? ' active' : ''}" data-tab="${id}">${label}</button>`).join('')}</nav>`;
@@ -470,7 +470,7 @@
           <label>Metric <select id="pvMetric"><option value="">(row count)</option>${a.numCols.map((c) => `<option${c === a.primaryMetric ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
           <label>Aggregate <select id="pvAgg"><option value="mean">mean</option><option value="sum">sum</option><option value="count">count</option></select></label>
         </div>
-        <div class="scrollx" id="pivotOut">${C.heatmap(ct, { currency: isCur })}</div></section>`;
+        <div class="scrollx" id="pivotOut">${C.heatmap(ct, { currency: isCur, maxWidth: pivotWidth() })}</div></section>`;
     }
     return html;
   }
@@ -517,10 +517,7 @@
 
   /* ---------- time ---------- */
   function renderTime(a) {
-    if (!a.series) {
-      return `<section class="card"><div class="sechead"><span class="sicon">📈</span><h2>Trends & projection</h2></div>
-        <p class="empty">No usable date column was found alongside a numeric metric, so time-series analysis is skipped. ${a.dateCols.length ? '' : 'If one of your columns holds dates, set its type to <b>date</b> in the preview step and re-run.'} Everything else in this report works without dates.</p></section>`;
-    }
+    if (!a.series) return renderOrderedTrends(a);
     const isCur = a.typeOf(a.primaryMetric) === 'currency';
     const ma = A.movingAverage(a.series, 7);
     const anomPts = [];
@@ -556,6 +553,112 @@
       ${pts.slice(0, 40).map((p) => `<tr><td>${fmtDate(new Date(p.t))}</td><td class="num"><b>${fmtNum(p.value, { currency: isCur })}</b></td><td class="num dim">${fmtNum(p.lower, { currency: isCur })}</td><td class="num dim">${fmtNum(p.upper, { currency: isCur })}</td></tr>`).join('')}
       </tbody></table></div></section>`;
     return html;
+  }
+
+  // No date column: a "trend" still exists along any ordered dimension.
+  // Show how the headline metric progresses across ordinal/binned fields
+  // (age brackets, tenure, quintiles) plus a cumulative distribution — so the
+  // tab is genuinely useful for cross-sectional data instead of apologising.
+  function renderOrderedTrends(a) {
+    const metric = a.primaryMetric;
+    if (!metric) {
+      return `<section class="card"><div class="sechead"><span class="sicon">📈</span><h2>Trends</h2></div>
+        <p class="empty">Trend analysis needs a numeric metric. This dataset has no numeric column that varies, so there is nothing to trend.</p></section>`;
+    }
+    const isCur = a.typeOf(metric) === 'currency';
+    const p = a.byName[metric];
+
+    // Rank an ordered categorical: leading number, or a known ordinal word list.
+    const ORDINAL = ['none', 'very low', 'low', 'poor', 'fair', 'medium', 'moderate', 'average', 'good', 'high', 'very high', 'very good', 'excellent'];
+    const rankOf = (k) => {
+      const str = String(k).trim();
+      const num = /(-?\d+(?:\.\d+)?)/.exec(str.replace(/,/g, ''));
+      if (num) return parseFloat(num[1]);
+      const idx = ORDINAL.indexOf(str.toLowerCase());
+      return idx >= 0 ? idx : NaN;
+    };
+    const ordered = [];
+    // A metric's own quintile bands trivially "predict" it (R²=1.00) — that is
+    // a restatement, not a trend. Exclude the metric's own derived bins.
+    const selfBin = `${metric} (quintile)`;
+    a.catCols.filter((c) => c !== selfBin).forEach((c) => {
+      const prof = a.byName[c];
+      const levels = prof && prof.counts ? prof.counts.map(([k]) => k) : [...new Set(a.rows.map((r) => String(r[c] ?? '').trim()))].filter(Boolean);
+      if (levels.length < 3 || levels.length > 12) return;
+      const ranks = levels.map(rankOf);
+      if (ranks.some((x) => !isFinite(x))) return;           // not an ordered field
+      if (new Set(ranks).size !== ranks.length) return;
+      const groups = levels.map((k, i) => {
+        const vals = A.num(a.rows.filter((r) => String(r[c] ?? '').trim() === k).map((r) => A.parseNumberLike(r[metric])));
+        return { key: k, rank: ranks[i], n: vals.length, mean: vals.length ? A.mean(vals) : 0, median: vals.length ? A.median(vals) : 0, sum: A.sum(vals) };
+      }).filter((g) => g.n >= 3).sort((x, y) => x.rank - y.rank);
+      if (groups.length < 3) return;
+      const fit = A.linreg(groups.map((g) => g.rank), groups.map((g) => g.mean));
+      ordered.push({ col: c, groups, fit, swing: groups[groups.length - 1].mean - groups[0].mean });
+    });
+    ordered.sort((x, y) => Math.abs(y.fit.r2) - Math.abs(x.fit.r2));
+
+    let html = `<section class="card"><div class="sechead"><span class="sicon">📈</span><h2>Trends</h2><span class="dim small">no date column — showing progression across ordered fields</span></div>
+      <p class="explain">This dataset is <b>cross-sectional</b>: each row is an independent record rather than a point in time, so there is no calendar trend to plot. A trend still exists along any <i>ordered</i> dimension, so ${esc(metric)} is tracked across ranked bands below.${a.dateCols.length ? '' : ' If one of your columns does hold dates, set its type to <b>date</b> in the preview step and re-run to unlock forecasting.'}</p>`;
+
+    if (ordered.length) {
+      html += `<div class="grid2">${ordered.slice(0, 4).map((o) => `<div class="subcard">
+        <h4>${esc(metric)} across ${esc(o.col)}</h4>
+        <p class="dim small">R² = ${o.fit.r2.toFixed(2)} · ${o.fit.slope >= 0 ? 'rising' : 'falling'} · swing ${fmtNum(o.swing, { currency: isCur })}</p>
+        ${C.barH(o.groups.map((g) => ({ label: g.key, value: g.mean, sub: `n=${g.n}`, color: o.fit.slope >= 0 ? 'var(--c1)' : 'var(--c4)' })), { currency: isCur })}
+        <table class="mini"><thead><tr><th>Band</th><th class="num">n</th><th class="num">Mean</th><th class="num">Median</th><th class="num">Δ prev</th></tr></thead><tbody>
+        ${o.groups.map((g, i) => {
+          const prev = o.groups[i - 1];
+          const d = prev && prev.mean ? ((g.mean - prev.mean) / Math.abs(prev.mean)) * 100 : null;
+          return `<tr><td>${esc(trunc(g.key, 22))}</td><td class="num">${g.n}</td><td class="num">${fmtNum(g.mean, { currency: isCur })}</td><td class="num">${fmtNum(g.median, { currency: isCur })}</td><td class="num ${d == null ? '' : d >= 0 ? 'pos' : 'neg'}">${d == null ? '—' : (d >= 0 ? '+' : '') + d.toFixed(1) + '%'}</td></tr>`;
+        }).join('')}</tbody></table></div>`).join('')}</div>`;
+    } else {
+      html += `<p class="empty">No ordered categorical fields (age bands, tenure, ratings, quintiles) were detected, so there is no sequence to trend along. The <b>Drivers</b> and <b>Segments</b> tabs cover the group differences in this data.</p>`;
+    }
+    html += '</section>';
+
+    // Cumulative distribution — always available for a numeric metric.
+    if (p && p.values && p.values.length > 10) {
+      const sorted = [...p.values].sort((x, y) => x - y);
+      const pts = [];
+      const STEPS = 40;
+      for (let i = 0; i <= STEPS; i++) {
+        const q = i / STEPS;
+        pts.push({ t: q * 100, value: A.quantile(sorted, q) });
+      }
+      const decChunks = [];
+      for (let d = 0; d < 10; d++) {
+        const lo = Math.floor((d / 10) * sorted.length), hi = Math.floor(((d + 1) / 10) * sorted.length);
+        const slice = sorted.slice(lo, Math.max(hi, lo + 1));
+        decChunks.push({ label: `D${d + 1}`, value: A.sum(slice), n: slice.length });
+      }
+      const total = A.sum(sorted) || 1;
+      html += `<section class="card"><div class="sechead"><span class="sicon">📊</span><h2>Distribution curve — ${esc(metric)}</h2></div>
+        <p class="explain">The percentile curve shows the value at each point in the distribution: the steeper the right-hand tail, the more concentrated the metric is in a few large records.</p>
+        <div class="grid2">
+          <div class="subcard"><h4>Value by percentile</h4>
+            ${C.timeSeries(pts.map((q) => ({ t: q.t, value: q.value, date: new Date() })), null, null, { currency: isCur, width: 560, height: 260 })}
+            <p class="dim small">P10 ${fmtNum(A.quantile(sorted, 0.1), { currency: isCur })} · P50 ${fmtNum(p.median, { currency: isCur })} · P90 ${fmtNum(A.quantile(sorted, 0.9), { currency: isCur })}</p></div>
+          <div class="subcard"><h4>Share of total by decile</h4>
+            ${C.barH(decChunks.map((d) => ({ label: d.label, value: (d.value / total) * 100, sub: `n=${d.n}`, color: 'var(--c3)' })), {})}
+            <p class="dim small">Top decile holds ${((decChunks[9].value / total) * 100).toFixed(1)}% of all ${esc(metric)}.</p></div>
+        </div></section>`;
+    }
+    return html + renderPeriodFreeSummary(a, isCur);
+  }
+
+  // Record-count profile across the biggest categorical — a "volume" view that
+  // stands in for the records-per-period chart a dated set would get.
+  function renderPeriodFreeSummary(a, isCur) {
+    const cat = a.baseCats.find((c) => { const p = a.byName[c]; return p && p.unique >= 3 && p.unique <= 14; });
+    if (!cat) return '';
+    const pr = A.pareto(a.rows, cat, a.primaryMetric);
+    return `<section class="card"><div class="sechead"><span class="sicon">📆</span><h2>Volume profile</h2><span class="dim small">by ${esc(cat)}</span></div>
+      <p class="explain">Without dates there is no per-period volume, so this shows how records and total ${esc(a.primaryMetric)} distribute across ${esc(cat)}.</p>
+      <div class="grid2">
+        <div class="subcard"><h4>Total ${esc(a.primaryMetric)}</h4>${C.barH(pr.items.slice(0, 12).map((i) => ({ label: i.key, value: i.value, sub: i.share.toFixed(1) + '%', color: 'var(--c1)' })), { currency: isCur })}</div>
+        <div class="subcard"><h4>Share of total</h4>${C.donut(pr.items.slice(0, 8).map((i) => ({ label: i.key, value: i.value })), { currency: isCur, centerLabel: 'total', size: 200 })}</div>
+      </div></section>`;
   }
 
   // Month-by-month table + bars. Works for any dated dataset, trend or not.
@@ -686,8 +789,16 @@
     const a = STATE.analysis;
     const r = el('pvRow').value, c = el('pvCol').value, m = el('pvMetric').value, agg = el('pvAgg').value;
     const ct = A.crossTab(a.rows, r, c, m || null, agg);
-    el('pivotOut').innerHTML = C.heatmap(ct, { currency: m && a.typeOf(m) === 'currency' });
+    el('pivotOut').innerHTML = C.heatmap(ct, { currency: m && a.typeOf(m) === 'currency', maxWidth: pivotWidth() });
     if (global.PrismaAnim) global.PrismaAnim.play(el('pivotOut'));
+  }
+
+  // Width available to the pivot. Measured from the live container when it
+  // exists, otherwise estimated from the viewport so the first paint fills too.
+  function pivotWidth() {
+    const node = el('pivotOut');
+    if (node && node.clientWidth > 200) return node.clientWidth;
+    return Math.min(1360, Math.max(360, window.innerWidth - 48)) - 44;
   }
 
   /* ---------- data tab ---------- */
@@ -713,6 +824,10 @@
       if (global.PrismaAnim) global.PrismaAnim.swapTab(pane);
     }));
     ['pvRow', 'pvCol', 'pvMetric', 'pvAgg'].forEach((id) => { const e = el(id); if (e) e.addEventListener('change', drawPivot); });
+    if (el('pvRow')) {
+      let rt = null;
+      window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (el('pivotOut')) drawPivot(); }, 180); });
+    }
     ['exMetric', 'exGroup', 'exSort'].forEach((id) => { const e = el(id); if (e) e.addEventListener('change', drawExplore); });
     ['scX', 'scY'].forEach((id) => { const e = el(id); if (e) e.addEventListener('change', drawScatter); });
   }
