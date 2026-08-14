@@ -437,6 +437,21 @@
       <p class="explain">Each value of every categorical field is compared against the dataset average for <b>${esc(a.primaryMetric)}</b>. The z-score accounts for segment size, so a small segment needs a bigger gap to rank highly. |z| ≥ 2 is unlikely to be noise.</p>
       <div class="grid2">${tbl(hot, '📈 Over-performing segments', 'var(--pos)')}${tbl(cold, '📉 Under-performing segments', 'var(--neg)')}</div></section>`;
 
+    // composition donuts — share of the metric held by each category value
+    const donutCats = a.baseCats.filter((c) => {
+      const p = a.byName[c];
+      return p && p.unique >= 2 && p.unique <= 10;
+    }).slice(0, 4);
+    if (donutCats.length) {
+      html += `<section class="card"><div class="sechead"><span class="sicon">🍩</span><h2>Composition of ${esc(a.primaryMetric)}</h2><span class="dim small">share of total per group</span></div>
+        <p class="explain">Each ring shows how the total ${esc(a.primaryMetric)} splits across a categorical field. The number in the centre is the overall total.</p>
+        <div class="grid2">${donutCats.map((c) => {
+          const pr = A.pareto(a.rows, c, a.primaryMetric);
+          const items = pr.items.slice(0, 8).map((it) => ({ label: it.key, value: it.value }));
+          return `<div class="subcard"><h4>${esc(c)}</h4>${C.donut(items, { currency: isCur, centerLabel: 'total', size: 200 })}</div>`;
+        }).join('')}</div></section>`;
+    }
+
     if (a.paretoResults.length) {
       html += `<section class="card"><div class="sechead"><span class="sicon">🏔️</span><h2>Concentration (Pareto)</h2></div>
         <p class="explain">Bars show total ${esc(a.primaryMetric)} per group, the line shows the running cumulative share. The dashed line marks 80%.</p>
@@ -480,8 +495,11 @@
       } else if (p.type === 'date' && p.dates && p.dates.length) {
         inner = `<div class="statgrid">${stat('Earliest', fmtDate(p.minDate))}${stat('Latest', fmtDate(p.maxDate))}${stat('Span', p.spanDays + ' days')}${stat('Distinct dates', p.unique.toLocaleString())}</div>`;
       } else if (p.counts) {
+        const useDonut = p.unique >= 2 && p.unique <= 8;
         inner = `<div class="statgrid">${stat('Distinct', p.unique.toLocaleString())}${stat('Top share', p.topShare.toFixed(1) + '%')}${stat('Balance', (p.balance * 100).toFixed(0) + '%')}${stat('Singletons', p.rare)}</div>
-          ${C.barH(p.top.map((t) => ({ label: t.key, value: t.count, sub: t.pct.toFixed(1) + '%', color: 'var(--c1)' })), {})}
+          ${useDonut
+            ? C.donut(p.top.map((t) => ({ label: t.key, value: t.count })), { centerLabel: 'rows', size: 190 })
+            : C.barH(p.top.map((t) => ({ label: t.key, value: t.count, sub: t.pct.toFixed(1) + '%', color: 'var(--c1)' })), {})}
           ${p.unique > 12 ? `<p class="dim small">Showing top 12 of ${p.unique} values.</p>` : ''}
           <p class="dim small">Balance ${(p.balance * 100).toFixed(0)}% (entropy ÷ max entropy) — ${p.balance > 0.85 ? 'values are evenly spread' : p.balance > 0.5 ? 'moderately uneven' : 'dominated by a few values'}.</p>`;
       } else {
@@ -522,9 +540,14 @@
         </div>
         <p class="explain">Bars show deviation from the overall daily average. Values above zero run hotter than typical.</p></section>`;
     }
+    // Period breakdown — always shown, and the main content when the trend is
+    // too weak to project from. Aggregates the metric by month.
+    html += renderPeriodBreakdown(a, isCur);
+
     if (f.r2 < 0.15) {
-      html += `<section class="card"><div class="sechead"><span class="sicon">🔮</span><h2>Projection suppressed</h2></div>
-        <p class="empty">A trend line explains only <b>${(f.r2 * 100).toFixed(1)}%</b> of the movement in ${esc(a.primaryMetric)} (R² = ${f.r2.toFixed(2)}). Projecting from a fit this weak would produce a confident-looking number with no basis, so it is deliberately withheld.<br><br>This usually means each row is an independent record rather than a point in a time series. The <b>Drivers</b> and <b>Segments</b> tabs are where the signal is for this dataset.</p></section>`;
+      html += `<section class="card"><div class="sechead"><span class="sicon">🔮</span><h2>Why no projection</h2></div>
+        <p class="explain">A trend line explains only <b>${(f.r2 * 100).toFixed(1)}%</b> of the movement in ${esc(a.primaryMetric)} (R² = ${f.r2.toFixed(2)}). Projecting from a fit this weak would produce a confident-looking number with no basis, so it is deliberately withheld.
+        This usually means each row is an independent record (a policy, a customer, a transaction) rather than a measurement over time — the period tables above still describe the data accurately, and the <b>Drivers</b> and <b>Segments</b> tabs are where the signal is.</p></section>`;
       return html;
     }
     const pts = a.forecastResult.points;
@@ -533,6 +556,47 @@
       ${pts.slice(0, 40).map((p) => `<tr><td>${fmtDate(new Date(p.t))}</td><td class="num"><b>${fmtNum(p.value, { currency: isCur })}</b></td><td class="num dim">${fmtNum(p.lower, { currency: isCur })}</td><td class="num dim">${fmtNum(p.upper, { currency: isCur })}</td></tr>`).join('')}
       </tbody></table></div></section>`;
     return html;
+  }
+
+  // Month-by-month table + bars. Works for any dated dataset, trend or not.
+  function renderPeriodBreakdown(a, isCur) {
+    const buckets = new Map();
+    a.rows.forEach((r) => {
+      const d = A.parseDateLike(r[a.dateCol]); if (!d) return;
+      const v = A.parseNumberLike(r[a.primaryMetric]); if (!isFinite(v)) return;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(v);
+    });
+    if (buckets.size < 2) return '';
+    const periods = [...buckets.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([key, vals]) => ({
+      key, n: vals.length, sum: A.sum(vals), mean: A.mean(vals), median: A.median(vals),
+      min: Math.min(...vals), max: Math.max(...vals),
+    }));
+    periods.forEach((p, i) => {
+      const prev = periods[i - 1];
+      p.change = prev && prev.sum ? ((p.sum - prev.sum) / Math.abs(prev.sum)) * 100 : null;
+    });
+    const best = periods.slice().sort((x, y) => y.sum - x.sum)[0];
+    const worst = periods.slice().sort((x, y) => x.sum - y.sum)[0];
+    const label = (k) => {
+      const [y, m] = k.split('-');
+      return new Date(+y, +m - 1, 1).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+    };
+    return `<section class="card"><div class="sechead"><span class="sicon">📆</span><h2>Period breakdown</h2><span class="dim small">${periods.length} months · by ${esc(a.dateCol)}</span></div>
+      <p class="explain">Totals, averages and record counts for every month in the data. Highest month is <b>${label(best.key)}</b> (${fmtNum(best.sum, { currency: isCur })}); lowest is <b>${label(worst.key)}</b> (${fmtNum(worst.sum, { currency: isCur })}).</p>
+      <div class="grid2">
+        <div class="subcard"><h4>Total ${esc(a.primaryMetric)} by month</h4>
+          ${C.barH(periods.map((p) => ({ label: label(p.key), value: p.sum, sub: `n=${p.n}`, color: 'var(--c1)' })), { currency: isCur })}</div>
+        <div class="subcard"><h4>Records per month</h4>
+          ${C.barH(periods.map((p) => ({ label: label(p.key), value: p.n, color: 'var(--c3)' })), {})}</div>
+      </div>
+      <div class="tablewrap"><table><thead><tr><th>Period</th><th class="num">Records</th><th class="num">Total</th><th class="num">Mean</th><th class="num">Median</th><th class="num">Min</th><th class="num">Max</th><th class="num">vs prev</th></tr></thead><tbody>
+      ${periods.map((p) => `<tr><td>${label(p.key)}</td><td class="num">${p.n}</td><td class="num"><b>${fmtNum(p.sum, { currency: isCur })}</b></td>
+        <td class="num">${fmtNum(p.mean, { currency: isCur })}</td><td class="num">${fmtNum(p.median, { currency: isCur })}</td>
+        <td class="num dim">${fmtNum(p.min, { currency: isCur })}</td><td class="num dim">${fmtNum(p.max, { currency: isCur })}</td>
+        <td class="num ${p.change == null ? '' : p.change >= 0 ? 'pos' : 'neg'}">${p.change == null ? '—' : (p.change >= 0 ? '+' : '') + p.change.toFixed(1) + '%'}</td></tr>`).join('')}
+      </tbody></table></div></section>`;
   }
 
   /* ---------- quality ---------- */

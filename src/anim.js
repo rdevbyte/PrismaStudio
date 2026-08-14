@@ -123,57 +123,73 @@
     return 'fade';
   }
 
-  /* ---------- scroll-triggered reveal (IntersectionObserver) ---------- */
+  /* ---------- scroll-triggered reveal (IntersectionObserver) ----------
+     Elements re-animate every time they re-enter the viewport, so scrolling
+     away and coming back replays the motion. Observers are kept (never
+     unobserved) and elements are re-armed once they leave the viewport.   */
+
   let observer = null;
   function ensureObserver() {
     if (observer || !('IntersectionObserver' in global)) return observer;
     observer = new IntersectionObserver((entries) => {
       entries.forEach((e) => {
         const t = e.target;
-        // Reveal when intersecting OR once the element has been scrolled past.
-        // A fast jump (End key, scrollTo bottom, anchor link) can skip an
-        // element entirely without ever reporting isIntersecting — without this
-        // the content would stay at opacity:0 permanently.
-        const passed = !e.isIntersecting && e.boundingClientRect.bottom <= 0;
-        if (!e.isIntersecting && !passed) return;
-        observer.unobserve(t);
-        if (t.tagName.toLowerCase() === 'svg') animateSvg(t);
-        else revealCard(t, passed);
+        if (e.isIntersecting) {
+          if (t.tagName.toLowerCase() === 'svg') animateSvg(t);
+          else revealCard(t);
+        } else {
+          // Left the viewport — re-arm so it plays again on the way back.
+          rearm(t);
+        }
       });
-    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
+    }, { rootMargin: '0px 0px -5% 0px', threshold: 0.05 });
     return observer;
   }
 
-  // Safety net: nothing primed for reveal may stay invisible. Runs on scroll
-  // end and window resize, and catches anything the observer missed.
+  // Re-arm only when fully outside the viewport, so a partially visible
+  // element is never yanked back to opacity:0 while the user is looking at it.
+  function rearm(node) {
+    const r = node.getBoundingClientRect();
+    const fullyOut = r.bottom < -20 || r.top > innerHeight + 20;
+    if (!fullyOut) return;
+    if (node.tagName.toLowerCase() === 'svg') {
+      node.dataset.animated = '';
+    } else if (node.dataset.revealed === '1') {
+      node.dataset.revealed = '';
+    }
+  }
+
+  // Safety net: anything registered must be visible if it is on screen.
+  // Guarantees content can never be stranded at opacity:0.
   function sweep() {
     if (!gsap || REDUCED) return;
-    document.querySelectorAll('[data-reveal-pending="1"]').forEach((node) => {
+    document.querySelectorAll('[data-reveal-armed="1"]').forEach((node) => {
+      if (!isLaidOut(node)) return;
       const r = node.getBoundingClientRect();
-      // Scrolled past without ever intersecting (fast jump): show it instantly.
-      if (r.bottom <= 0) { revealCard(node, true); return; }
-      // Near or inside the viewport: animate it in.
-      if (r.top < innerHeight * 1.25) revealCard(node);
+      const onScreen = r.top < innerHeight && r.bottom > 0;
+      if (onScreen && node.dataset.revealed !== '1') revealCard(node);
+    });
+    document.querySelectorAll('svg.chart[data-anim-armed="1"]').forEach((svg) => {
+      if (!isLaidOut(svg)) return;
+      const r = svg.getBoundingClientRect();
+      if (r.top < innerHeight && r.bottom > 0 && svg.dataset.animated !== '1') animateSvg(svg);
     });
   }
   let sweepTimer = null;
   function scheduleSweep() {
     clearTimeout(sweepTimer);
-    sweepTimer = setTimeout(sweep, 120);
+    sweepTimer = setTimeout(sweep, 100);
   }
   if (typeof addEventListener === 'function') {
     addEventListener('scroll', scheduleSweep, { passive: true });
     addEventListener('resize', scheduleSweep, { passive: true });
   }
 
-  // `instant` skips the transition for elements the user scrolled straight past
-  // — animating them would be pointless motion for content already behind them.
-  function revealCard(node, instant) {
+  function revealCard(node) {
     if (!gsap || REDUCED || node.dataset.revealed === '1') return;
     node.dataset.revealed = '1';
-    delete node.dataset.revealPending;
-    if (instant) { gsap.set(node, { opacity: 1, y: 0, clearProps: 'transform' }); return; }
-    gsap.fromTo(node, { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: EASE_OUT });
+    gsap.killTweensOf(node);
+    gsap.fromTo(node, { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.45, ease: EASE_OUT, overwrite: 'auto' });
   }
 
   /* ---------- public API ---------- */
@@ -187,40 +203,45 @@
   }
 
   function observe(root) {
-    if (!gsap || REDUCED) return;
-    // A hidden pane can't be measured yet. Defer until it's displayed.
+    if (!gsap || REDUCED || !root) return;
+    // A hidden pane has no layout yet; retry once it is displayed.
     if (root !== document && root.nodeType === 1 && !isLaidOut(root)) {
       root.dataset.animPending = '1';
       return;
     }
     delete root.dataset.animPending;
     const obs = ensureObserver();
-    const svgs = [...root.querySelectorAll('svg.chart:not([data-animated="1"])')];
-    const cards = [...root.querySelectorAll('.card:not([data-revealed="1"]), .finding:not([data-revealed="1"]), .subcard:not([data-revealed="1"]), .kpi:not([data-revealed="1"])')];
-    if (!obs) { svgs.forEach(animateSvg); return; }
+    const svgs = [...root.querySelectorAll('svg.chart')];
+    const cards = [...root.querySelectorAll('.card, .finding, .subcard, .kpi')];
+
+    if (!obs) { // no IntersectionObserver: show everything, animate immediately
+      cards.forEach((c) => { c.dataset.revealed = '1'; gsap.set(c, { opacity: 1 }); });
+      svgs.forEach(animateSvg);
+      return;
+    }
 
     cards.forEach((c) => {
-      if (!isLaidOut(c)) return;               // never hide what we can't reveal
+      if (!isLaidOut(c)) return;
       const r = c.getBoundingClientRect();
-      // Already on screen, or already scrolled past? Show it now — don't hide
-      // content the user can see (or has passed) just to animate it later.
-      if (r.top < innerHeight && r.bottom > 0) { revealCard(c); return; }
-      if (r.bottom <= 0) { c.dataset.revealed = '1'; return; }
-      gsap.set(c, { opacity: 0 });
-      c.dataset.revealPending = '1';
-      obs.observe(c);
+      const onScreen = r.top < innerHeight && r.bottom > 0;
+      if (c.dataset.revealArmed !== '1') {
+        c.dataset.revealArmed = '1';
+        obs.observe(c);
+      }
+      if (onScreen) revealCard(c);
+      else if (c.dataset.revealed !== '1') gsap.set(c, { opacity: 0 });
     });
-    svgs.forEach((s) => {
-      if (!isLaidOut(s)) { animateSvg(s); return; } // fall back to immediate play
-      const r = s.getBoundingClientRect();
-      // On screen now? Play immediately — IO can be a frame late and reads as stale.
-      if (r.top < innerHeight && r.bottom > 0) { animateSvg(s); return; }
-      // Scrolled PAST (above the viewport) happens right after a tab switch,
-      // before the smooth scroll-to-top lands. The observer would never fire
-      // for these, so play them too rather than leaving them frozen.
-      if (r.bottom <= 0) { animateSvg(s); return; }
-      obs.observe(s);
+
+    svgs.forEach((sv) => {
+      if (!isLaidOut(sv)) { animateSvg(sv); return; }
+      if (sv.dataset.animArmed !== '1') {
+        sv.dataset.animArmed = '1';
+        obs.observe(sv);
+      }
+      const r = sv.getBoundingClientRect();
+      if (r.top < innerHeight && r.bottom > 0) animateSvg(sv);
     });
+    scheduleSweep();
   }
 
   // Force-animate a freshly rendered container (e.g. after a control change).

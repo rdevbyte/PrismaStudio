@@ -153,6 +153,13 @@ svg.chart{width:100%;height:auto;display:block;margin:10px 0;overflow:visible}
 /* pivot renders at true pixel scale so labels never magnify or collide */
 svg.chart.pivot{width:auto;height:auto;max-width:none;flex:none}
 .scrollx{overflow-x:auto;overflow-y:hidden;padding-bottom:4px}
+.donutwrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.donutwrap svg.chart{width:200px;flex:none}
+.legend{list-style:none;margin:0;padding:0;flex:1;min-width:180px;display:grid;gap:5px}
+.legend li{display:flex;align-items:center;gap:8px;font-size:12.5px}
+.legend .sw{width:11px;height:11px;border-radius:3px;flex:none}
+.legend .lg-lbl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.legend .lg-val{font-variant-numeric:tabular-nums;font-weight:600}
 .pcell{cursor:default}
 .pcell rect{transition:opacity .15s}
 .pcell:hover rect{opacity:1!important;stroke:var(--text);stroke-width:1.5}
@@ -401,57 +408,73 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
     return 'fade';
   }
 
-  /* ---------- scroll-triggered reveal (IntersectionObserver) ---------- */
+  /* ---------- scroll-triggered reveal (IntersectionObserver) ----------
+     Elements re-animate every time they re-enter the viewport, so scrolling
+     away and coming back replays the motion. Observers are kept (never
+     unobserved) and elements are re-armed once they leave the viewport.   */
+
   let observer = null;
   function ensureObserver() {
     if (observer || !('IntersectionObserver' in global)) return observer;
     observer = new IntersectionObserver((entries) => {
       entries.forEach((e) => {
         const t = e.target;
-        // Reveal when intersecting OR once the element has been scrolled past.
-        // A fast jump (End key, scrollTo bottom, anchor link) can skip an
-        // element entirely without ever reporting isIntersecting — without this
-        // the content would stay at opacity:0 permanently.
-        const passed = !e.isIntersecting && e.boundingClientRect.bottom <= 0;
-        if (!e.isIntersecting && !passed) return;
-        observer.unobserve(t);
-        if (t.tagName.toLowerCase() === 'svg') animateSvg(t);
-        else revealCard(t, passed);
+        if (e.isIntersecting) {
+          if (t.tagName.toLowerCase() === 'svg') animateSvg(t);
+          else revealCard(t);
+        } else {
+          // Left the viewport — re-arm so it plays again on the way back.
+          rearm(t);
+        }
       });
-    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
+    }, { rootMargin: '0px 0px -5% 0px', threshold: 0.05 });
     return observer;
   }
 
-  // Safety net: nothing primed for reveal may stay invisible. Runs on scroll
-  // end and window resize, and catches anything the observer missed.
+  // Re-arm only when fully outside the viewport, so a partially visible
+  // element is never yanked back to opacity:0 while the user is looking at it.
+  function rearm(node) {
+    const r = node.getBoundingClientRect();
+    const fullyOut = r.bottom < -20 || r.top > innerHeight + 20;
+    if (!fullyOut) return;
+    if (node.tagName.toLowerCase() === 'svg') {
+      node.dataset.animated = '';
+    } else if (node.dataset.revealed === '1') {
+      node.dataset.revealed = '';
+    }
+  }
+
+  // Safety net: anything registered must be visible if it is on screen.
+  // Guarantees content can never be stranded at opacity:0.
   function sweep() {
     if (!gsap || REDUCED) return;
-    document.querySelectorAll('[data-reveal-pending="1"]').forEach((node) => {
+    document.querySelectorAll('[data-reveal-armed="1"]').forEach((node) => {
+      if (!isLaidOut(node)) return;
       const r = node.getBoundingClientRect();
-      // Scrolled past without ever intersecting (fast jump): show it instantly.
-      if (r.bottom <= 0) { revealCard(node, true); return; }
-      // Near or inside the viewport: animate it in.
-      if (r.top < innerHeight * 1.25) revealCard(node);
+      const onScreen = r.top < innerHeight && r.bottom > 0;
+      if (onScreen && node.dataset.revealed !== '1') revealCard(node);
+    });
+    document.querySelectorAll('svg.chart[data-anim-armed="1"]').forEach((svg) => {
+      if (!isLaidOut(svg)) return;
+      const r = svg.getBoundingClientRect();
+      if (r.top < innerHeight && r.bottom > 0 && svg.dataset.animated !== '1') animateSvg(svg);
     });
   }
   let sweepTimer = null;
   function scheduleSweep() {
     clearTimeout(sweepTimer);
-    sweepTimer = setTimeout(sweep, 120);
+    sweepTimer = setTimeout(sweep, 100);
   }
   if (typeof addEventListener === 'function') {
     addEventListener('scroll', scheduleSweep, { passive: true });
     addEventListener('resize', scheduleSweep, { passive: true });
   }
 
-  // `instant` skips the transition for elements the user scrolled straight past
-  // — animating them would be pointless motion for content already behind them.
-  function revealCard(node, instant) {
+  function revealCard(node) {
     if (!gsap || REDUCED || node.dataset.revealed === '1') return;
     node.dataset.revealed = '1';
-    delete node.dataset.revealPending;
-    if (instant) { gsap.set(node, { opacity: 1, y: 0, clearProps: 'transform' }); return; }
-    gsap.fromTo(node, { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: EASE_OUT });
+    gsap.killTweensOf(node);
+    gsap.fromTo(node, { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.45, ease: EASE_OUT, overwrite: 'auto' });
   }
 
   /* ---------- public API ---------- */
@@ -465,40 +488,45 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
   }
 
   function observe(root) {
-    if (!gsap || REDUCED) return;
-    // A hidden pane can't be measured yet. Defer until it's displayed.
+    if (!gsap || REDUCED || !root) return;
+    // A hidden pane has no layout yet; retry once it is displayed.
     if (root !== document && root.nodeType === 1 && !isLaidOut(root)) {
       root.dataset.animPending = '1';
       return;
     }
     delete root.dataset.animPending;
     const obs = ensureObserver();
-    const svgs = [...root.querySelectorAll('svg.chart:not([data-animated="1"])')];
-    const cards = [...root.querySelectorAll('.card:not([data-revealed="1"]), .finding:not([data-revealed="1"]), .subcard:not([data-revealed="1"]), .kpi:not([data-revealed="1"])')];
-    if (!obs) { svgs.forEach(animateSvg); return; }
+    const svgs = [...root.querySelectorAll('svg.chart')];
+    const cards = [...root.querySelectorAll('.card, .finding, .subcard, .kpi')];
+
+    if (!obs) { // no IntersectionObserver: show everything, animate immediately
+      cards.forEach((c) => { c.dataset.revealed = '1'; gsap.set(c, { opacity: 1 }); });
+      svgs.forEach(animateSvg);
+      return;
+    }
 
     cards.forEach((c) => {
-      if (!isLaidOut(c)) return;               // never hide what we can't reveal
+      if (!isLaidOut(c)) return;
       const r = c.getBoundingClientRect();
-      // Already on screen, or already scrolled past? Show it now — don't hide
-      // content the user can see (or has passed) just to animate it later.
-      if (r.top < innerHeight && r.bottom > 0) { revealCard(c); return; }
-      if (r.bottom <= 0) { c.dataset.revealed = '1'; return; }
-      gsap.set(c, { opacity: 0 });
-      c.dataset.revealPending = '1';
-      obs.observe(c);
+      const onScreen = r.top < innerHeight && r.bottom > 0;
+      if (c.dataset.revealArmed !== '1') {
+        c.dataset.revealArmed = '1';
+        obs.observe(c);
+      }
+      if (onScreen) revealCard(c);
+      else if (c.dataset.revealed !== '1') gsap.set(c, { opacity: 0 });
     });
-    svgs.forEach((s) => {
-      if (!isLaidOut(s)) { animateSvg(s); return; } // fall back to immediate play
-      const r = s.getBoundingClientRect();
-      // On screen now? Play immediately — IO can be a frame late and reads as stale.
-      if (r.top < innerHeight && r.bottom > 0) { animateSvg(s); return; }
-      // Scrolled PAST (above the viewport) happens right after a tab switch,
-      // before the smooth scroll-to-top lands. The observer would never fire
-      // for these, so play them too rather than leaving them frozen.
-      if (r.bottom <= 0) { animateSvg(s); return; }
-      obs.observe(s);
+
+    svgs.forEach((sv) => {
+      if (!isLaidOut(sv)) { animateSvg(sv); return; }
+      if (sv.dataset.animArmed !== '1') {
+        sv.dataset.animArmed = '1';
+        obs.observe(sv);
+      }
+      const r = sv.getBoundingClientRect();
+      if (r.top < innerHeight && r.bottom > 0) animateSvg(sv);
     });
+    scheduleSweep();
   }
 
   // Force-animate a freshly rendered container (e.g. after a control change).
@@ -1972,7 +2000,15 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
       ang = a2;
     });
     s += `<text x="${cx}" y="${cy - 2}" class="donutv mid">${esc(A.fmtNum(total, opts))}</text><text x="${cx}" y="${cy + 16}" class="tick mid">${esc(opts.centerLabel || 'total')}</text>`;
-    return s + '</svg>';
+    s += '</svg>';
+    if (opts.legend === false) return s;
+    const legend = items.map((it, i) => {
+      const pct = ((it.value / total) * 100).toFixed(1);
+      return `<li><span class="sw" style="background:${PAL[i % PAL.length]}"></span>` +
+        `<span class="lg-lbl">${esc(trunc(it.label, 22))}</span>` +
+        `<span class="lg-val">${esc(A.fmtNum(it.value, opts))} <span class="dim">${pct}%</span></span></li>`;
+    }).join('');
+    return `<div class="donutwrap">${s}<ul class="legend">${legend}</ul></div>`;
   }
 
   /* ---------- correlation matrix ---------- */
@@ -2753,6 +2789,21 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
       <p class="explain">Each value of every categorical field is compared against the dataset average for <b>${esc(a.primaryMetric)}</b>. The z-score accounts for segment size, so a small segment needs a bigger gap to rank highly. |z| ≥ 2 is unlikely to be noise.</p>
       <div class="grid2">${tbl(hot, '📈 Over-performing segments', 'var(--pos)')}${tbl(cold, '📉 Under-performing segments', 'var(--neg)')}</div></section>`;
 
+    // composition donuts — share of the metric held by each category value
+    const donutCats = a.baseCats.filter((c) => {
+      const p = a.byName[c];
+      return p && p.unique >= 2 && p.unique <= 10;
+    }).slice(0, 4);
+    if (donutCats.length) {
+      html += `<section class="card"><div class="sechead"><span class="sicon">🍩</span><h2>Composition of ${esc(a.primaryMetric)}</h2><span class="dim small">share of total per group</span></div>
+        <p class="explain">Each ring shows how the total ${esc(a.primaryMetric)} splits across a categorical field. The number in the centre is the overall total.</p>
+        <div class="grid2">${donutCats.map((c) => {
+          const pr = A.pareto(a.rows, c, a.primaryMetric);
+          const items = pr.items.slice(0, 8).map((it) => ({ label: it.key, value: it.value }));
+          return `<div class="subcard"><h4>${esc(c)}</h4>${C.donut(items, { currency: isCur, centerLabel: 'total', size: 200 })}</div>`;
+        }).join('')}</div></section>`;
+    }
+
     if (a.paretoResults.length) {
       html += `<section class="card"><div class="sechead"><span class="sicon">🏔️</span><h2>Concentration (Pareto)</h2></div>
         <p class="explain">Bars show total ${esc(a.primaryMetric)} per group, the line shows the running cumulative share. The dashed line marks 80%.</p>
@@ -2796,8 +2847,11 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
       } else if (p.type === 'date' && p.dates && p.dates.length) {
         inner = `<div class="statgrid">${stat('Earliest', fmtDate(p.minDate))}${stat('Latest', fmtDate(p.maxDate))}${stat('Span', p.spanDays + ' days')}${stat('Distinct dates', p.unique.toLocaleString())}</div>`;
       } else if (p.counts) {
+        const useDonut = p.unique >= 2 && p.unique <= 8;
         inner = `<div class="statgrid">${stat('Distinct', p.unique.toLocaleString())}${stat('Top share', p.topShare.toFixed(1) + '%')}${stat('Balance', (p.balance * 100).toFixed(0) + '%')}${stat('Singletons', p.rare)}</div>
-          ${C.barH(p.top.map((t) => ({ label: t.key, value: t.count, sub: t.pct.toFixed(1) + '%', color: 'var(--c1)' })), {})}
+          ${useDonut
+            ? C.donut(p.top.map((t) => ({ label: t.key, value: t.count })), { centerLabel: 'rows', size: 190 })
+            : C.barH(p.top.map((t) => ({ label: t.key, value: t.count, sub: t.pct.toFixed(1) + '%', color: 'var(--c1)' })), {})}
           ${p.unique > 12 ? `<p class="dim small">Showing top 12 of ${p.unique} values.</p>` : ''}
           <p class="dim small">Balance ${(p.balance * 100).toFixed(0)}% (entropy ÷ max entropy) — ${p.balance > 0.85 ? 'values are evenly spread' : p.balance > 0.5 ? 'moderately uneven' : 'dominated by a few values'}.</p>`;
       } else {
@@ -2838,9 +2892,14 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
         </div>
         <p class="explain">Bars show deviation from the overall daily average. Values above zero run hotter than typical.</p></section>`;
     }
+    // Period breakdown — always shown, and the main content when the trend is
+    // too weak to project from. Aggregates the metric by month.
+    html += renderPeriodBreakdown(a, isCur);
+
     if (f.r2 < 0.15) {
-      html += `<section class="card"><div class="sechead"><span class="sicon">🔮</span><h2>Projection suppressed</h2></div>
-        <p class="empty">A trend line explains only <b>${(f.r2 * 100).toFixed(1)}%</b> of the movement in ${esc(a.primaryMetric)} (R² = ${f.r2.toFixed(2)}). Projecting from a fit this weak would produce a confident-looking number with no basis, so it is deliberately withheld.<br><br>This usually means each row is an independent record rather than a point in a time series. The <b>Drivers</b> and <b>Segments</b> tabs are where the signal is for this dataset.</p></section>`;
+      html += `<section class="card"><div class="sechead"><span class="sicon">🔮</span><h2>Why no projection</h2></div>
+        <p class="explain">A trend line explains only <b>${(f.r2 * 100).toFixed(1)}%</b> of the movement in ${esc(a.primaryMetric)} (R² = ${f.r2.toFixed(2)}). Projecting from a fit this weak would produce a confident-looking number with no basis, so it is deliberately withheld.
+        This usually means each row is an independent record (a policy, a customer, a transaction) rather than a measurement over time — the period tables above still describe the data accurately, and the <b>Drivers</b> and <b>Segments</b> tabs are where the signal is.</p></section>`;
       return html;
     }
     const pts = a.forecastResult.points;
@@ -2849,6 +2908,47 @@ svg.chart .medline{stroke:var(--text);stroke-width:2.2}
       ${pts.slice(0, 40).map((p) => `<tr><td>${fmtDate(new Date(p.t))}</td><td class="num"><b>${fmtNum(p.value, { currency: isCur })}</b></td><td class="num dim">${fmtNum(p.lower, { currency: isCur })}</td><td class="num dim">${fmtNum(p.upper, { currency: isCur })}</td></tr>`).join('')}
       </tbody></table></div></section>`;
     return html;
+  }
+
+  // Month-by-month table + bars. Works for any dated dataset, trend or not.
+  function renderPeriodBreakdown(a, isCur) {
+    const buckets = new Map();
+    a.rows.forEach((r) => {
+      const d = A.parseDateLike(r[a.dateCol]); if (!d) return;
+      const v = A.parseNumberLike(r[a.primaryMetric]); if (!isFinite(v)) return;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(v);
+    });
+    if (buckets.size < 2) return '';
+    const periods = [...buckets.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([key, vals]) => ({
+      key, n: vals.length, sum: A.sum(vals), mean: A.mean(vals), median: A.median(vals),
+      min: Math.min(...vals), max: Math.max(...vals),
+    }));
+    periods.forEach((p, i) => {
+      const prev = periods[i - 1];
+      p.change = prev && prev.sum ? ((p.sum - prev.sum) / Math.abs(prev.sum)) * 100 : null;
+    });
+    const best = periods.slice().sort((x, y) => y.sum - x.sum)[0];
+    const worst = periods.slice().sort((x, y) => x.sum - y.sum)[0];
+    const label = (k) => {
+      const [y, m] = k.split('-');
+      return new Date(+y, +m - 1, 1).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+    };
+    return `<section class="card"><div class="sechead"><span class="sicon">📆</span><h2>Period breakdown</h2><span class="dim small">${periods.length} months · by ${esc(a.dateCol)}</span></div>
+      <p class="explain">Totals, averages and record counts for every month in the data. Highest month is <b>${label(best.key)}</b> (${fmtNum(best.sum, { currency: isCur })}); lowest is <b>${label(worst.key)}</b> (${fmtNum(worst.sum, { currency: isCur })}).</p>
+      <div class="grid2">
+        <div class="subcard"><h4>Total ${esc(a.primaryMetric)} by month</h4>
+          ${C.barH(periods.map((p) => ({ label: label(p.key), value: p.sum, sub: `n=${p.n}`, color: 'var(--c1)' })), { currency: isCur })}</div>
+        <div class="subcard"><h4>Records per month</h4>
+          ${C.barH(periods.map((p) => ({ label: label(p.key), value: p.n, color: 'var(--c3)' })), {})}</div>
+      </div>
+      <div class="tablewrap"><table><thead><tr><th>Period</th><th class="num">Records</th><th class="num">Total</th><th class="num">Mean</th><th class="num">Median</th><th class="num">Min</th><th class="num">Max</th><th class="num">vs prev</th></tr></thead><tbody>
+      ${periods.map((p) => `<tr><td>${label(p.key)}</td><td class="num">${p.n}</td><td class="num"><b>${fmtNum(p.sum, { currency: isCur })}</b></td>
+        <td class="num">${fmtNum(p.mean, { currency: isCur })}</td><td class="num">${fmtNum(p.median, { currency: isCur })}</td>
+        <td class="num dim">${fmtNum(p.min, { currency: isCur })}</td><td class="num dim">${fmtNum(p.max, { currency: isCur })}</td>
+        <td class="num ${p.change == null ? '' : p.change >= 0 ? 'pos' : 'neg'}">${p.change == null ? '—' : (p.change >= 0 ? '+' : '') + p.change.toFixed(1) + '%'}</td></tr>`).join('')}
+      </tbody></table></div></section>`;
   }
 
   /* ---------- quality ---------- */

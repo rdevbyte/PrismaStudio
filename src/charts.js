@@ -247,7 +247,15 @@
       ang = a2;
     });
     s += `<text x="${cx}" y="${cy - 2}" class="donutv mid">${esc(A.fmtNum(total, opts))}</text><text x="${cx}" y="${cy + 16}" class="tick mid">${esc(opts.centerLabel || 'total')}</text>`;
-    return s + '</svg>';
+    s += '</svg>';
+    if (opts.legend === false) return s;
+    const legend = items.map((it, i) => {
+      const pct = ((it.value / total) * 100).toFixed(1);
+      return `<li><span class="sw" style="background:${PAL[i % PAL.length]}"></span>` +
+        `<span class="lg-lbl">${esc(trunc(it.label, 22))}</span>` +
+        `<span class="lg-val">${esc(A.fmtNum(it.value, opts))} <span class="dim">${pct}%</span></span></li>`;
+    }).join('');
+    return `<div class="donutwrap">${s}<ul class="legend">${legend}</ul></div>`;
   }
 
   /* ---------- correlation matrix ---------- */

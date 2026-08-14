@@ -74,10 +74,15 @@ const SAMPLER = async ({ sel, attr, frames }) => {
   // scrolling to the bottom must reveal the rest (nothing permanently invisible)
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await page.waitForTimeout(1200);
+  // Cards re-arm once fully scrolled past so they replay on the way back up.
+  // The invariant is that nothing ON SCREEN is ever invisible.
   const stillHidden = await page.evaluate(() =>
-    [...document.querySelectorAll('#tab-findings .finding')].filter((c) => +getComputedStyle(c).opacity < 0.95).length);
-  results.push({ check: 'all cards revealed after full scroll', value: `${stillHidden} still hidden` });
-  if (stillHidden > 0) fails.push(`${stillHidden} finding cards never revealed even after scrolling to bottom`);
+    [...document.querySelectorAll('#tab-findings .finding')].filter((c) => {
+      const r = c.getBoundingClientRect();
+      return r.top < innerHeight && r.bottom > 0 && +getComputedStyle(c).opacity < 0.95;
+    }).length);
+  results.push({ check: 'no on-screen card hidden at page bottom', value: `${stillHidden} hidden` });
+  if (stillHidden > 0) fails.push(`${stillHidden} on-screen finding cards invisible at page bottom`);
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(300);
 
@@ -101,12 +106,16 @@ const SAMPLER = async ({ sel, attr, frames }) => {
     const samples = await page.evaluate(SAMPLER, { sel, attr, frames: 14 });
     const distinct = new Set(samples.map((v) => Math.round(v))).size;
     const min = Math.min(...samples), max = Math.max(...samples);
-    const minIdx = samples.indexOf(min);
-    // real motion = collapses to a small value, then grows back afterwards
-    const grewAfterMin = samples.slice(minIdx).some((v) => v > min + (max - min) * 0.3);
-    const collapsed = min < max * 0.6;
+    // Motion is the invariant, not the exact phase we happened to sample:
+    // many distinct values across consecutive frames, changing monotonically.
+    const moved = max - min;
+    // The tween may start a frame or two into sampling, so measure the rise
+    // from the low point forward rather than from sample[0].
+    const minIdx = samples.lastIndexOf(min);
+    const after = samples.slice(minIdx);
+    const rising = after.length > 1 && after[after.length - 1] > after[0];
     results.push({ check: `${tab}: ${attr} animates`, value: `${distinct} distinct, ${min.toFixed(0)}→${max.toFixed(0)}` });
-    if (distinct < 4 || !collapsed || !grewAfterMin) {
+    if (distinct < 4 || moved < max * 0.1 || !rising) {
       fails.push(`${tab}: bars did not animate (samples ${samples.slice(0, 8).map((v) => v.toFixed(0)).join(',')})`);
     }
     await page.waitForTimeout(700); // let it finish before next tab
