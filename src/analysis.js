@@ -1,5 +1,5 @@
 /* ============================================================
-   PrismaStudio — Analysis Engine (deterministic, no AI)
+   TabulaMetrics — Analysis Engine (deterministic, no AI)
    Pure functions. No DOM. No network.
    ============================================================ */
 (function (global) {
@@ -9,6 +9,11 @@
   const num = (a) => a.filter((v) => typeof v === 'number' && isFinite(v));
   const sum = (a) => a.reduce((s, v) => s + v, 0);
   const mean = (a) => (a.length ? sum(a) / a.length : NaN);
+  function minMax(a) {
+    let min = Infinity, max = -Infinity;
+    for (const value of a) { if (value < min) min = value; if (value > max) max = value; }
+    return a.length ? { min, max } : { min: NaN, max: NaN };
+  }
   function quantile(sorted, q) {
     if (!sorted.length) return NaN;
     const pos = (sorted.length - 1) * q, base = Math.floor(pos), rest = pos - base;
@@ -17,6 +22,25 @@
   const median = (a) => quantile([...a].sort((x, y) => x - y), 0.5);
   function variance(a) { if (a.length < 2) return 0; const m = mean(a); return sum(a.map((v) => (v - m) ** 2)) / (a.length - 1); }
   const sd = (a) => Math.sqrt(variance(a));
+
+  // Benjamini-Hochberg false-discovery-rate adjustment, applied to a complete
+  // family of tests before any effect-size display thresholds are applied.
+  function adjustPValues(items, getP = (item) => item.p) {
+    const out = items.map((item) => ({ ...item, pAdj: NaN }));
+    const valid = [];
+    out.forEach((item, index) => {
+      const p = getP(item);
+      if (isFinite(p)) valid.push({ index, p: Math.max(0, Math.min(1, p)) });
+    });
+    valid.sort((a, b) => a.p - b.p);
+    let running = 1;
+    for (let i = valid.length - 1; i >= 0; i--) {
+      const rank = i + 1;
+      running = Math.min(running, valid[i].p * valid.length / rank);
+      out[valid[i].index].pAdj = Math.min(1, running);
+    }
+    return out;
+  }
   function skewness(a) {
     const n = a.length; if (n < 3) return 0;
     const m = mean(a), s = sd(a); if (!s) return 0;
@@ -123,8 +147,8 @@
   // eta-squared: variance in numeric metric explained by categorical grouping
   function etaSquared(groups) {
     const all = [];
-    groups.forEach((g) => all.push(...g.values));
-    if (all.length < 3) return { eta2: 0, f: 0, p: NaN };
+    for (const group of groups) for (const value of group.values) all.push(value);
+    if (all.length < 3) return { eta2: 0, omega2: 0, f: 0, p: NaN, dfb: 0, dfw: 0, groups: groups.length, n: all.length };
     const gm = mean(all);
     let ssb = 0, ssw = 0;
     groups.forEach((g) => {
@@ -135,13 +159,27 @@
     const sst = ssb + ssw;
     const k = groups.length, n = all.length;
     const dfb = k - 1, dfw = n - k;
-    const f = dfb > 0 && dfw > 0 && ssw > 0 ? (ssb / dfb) / (ssw / dfw) : 0;
-    const p = dfb > 0 && dfw > 0 && f > 0 ? fDistPValue(f, dfb, dfw) : NaN;
-    return { eta2: sst ? ssb / sst : 0, f, p, dfb, dfw };
+    let f = 0, p = NaN;
+    if (dfb > 0 && dfw > 0) {
+      if (ssw === 0) {
+        // Perfectly separated constant groups have an infinite F statistic,
+        // not F=0 / p=NA. If there is no between-group variation either, the
+        // metric is constant and the test is undefined.
+        if (ssb > 0) { f = Infinity; p = 0; }
+      } else {
+        f = (ssb / dfb) / (ssw / dfw);
+        p = fDistPValue(f, dfb, dfw);
+      }
+    }
+    const msw = dfw > 0 ? ssw / dfw : 0;
+    const omega2 = sst + msw > 0 ? Math.max(0, (ssb - dfb * msw) / (sst + msw)) : 0;
+    return { eta2: sst ? ssb / sst : 0, omega2, f, p, dfb, dfw, groups: k, n };
   }
   function fDistPValue(f, d1, d2) {
+    if (f === Infinity) return 0;
+    if (!isFinite(f) || f < 0) return NaN;
     const x = (d1 * f) / (d1 * f + d2);
-    return 1 - incBeta(x, d1 / 2, d2 / 2);
+    return Math.max(0, Math.min(1, 1 - incBeta(x, d1 / 2, d2 / 2)));
   }
   // Cramér's V for two categoricals
   function cramersV(a, b) {
@@ -157,13 +195,20 @@
       obs[r][c]++; rt[r]++; ct[c]++; n++;
     }
     if (!n) return { v: 0, chi2: 0, p: NaN };
-    let chi2 = 0;
+    let chi2 = 0, smallExpected = 0, minExpected = Infinity, expectedCells = 0;
     for (let r = 0; r < rows.length; r++) for (let c = 0; c < cols.length; c++) {
       const e = (rt[r] * ct[c]) / n;
-      if (e > 0) chi2 += (obs[r][c] - e) ** 2 / e;
+      if (e > 0) {
+        expectedCells++;
+        minExpected = Math.min(minExpected, e);
+        if (e < 5) smallExpected++;
+        chi2 += (obs[r][c] - e) ** 2 / e;
+      }
     }
     const k = Math.min(rows.length - 1, cols.length - 1);
-    return { v: Math.sqrt(chi2 / (n * k)), chi2, p: chiSqPValue(chi2, (rows.length - 1) * (cols.length - 1)), n };
+    const chiSquareReliable = minExpected >= 1 && smallExpected <= expectedCells * 0.2;
+    const p = chiSquareReliable ? chiSqPValue(chi2, (rows.length - 1) * (cols.length - 1)) : NaN;
+    return { v: Math.sqrt(chi2 / (n * k)), chi2, p, n, minExpected, smallExpected, expectedCells, chiSquareReliable };
   }
   function chiSqPValue(x, df) {
     if (x <= 0 || df <= 0) return 1;
@@ -194,7 +239,7 @@
   const NUMBER_RE = /^\s*-?[\d,]*\.?\d+([eE][-+]?\d+)?\s*$/;
   const BOOL_SET = new Set(['true', 'false', 'yes', 'no', 'y', 'n', '1', '0', 't', 'f']);
   const DATE_RES = [
-    /^\d{4}-\d{1,2}-\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?/,
+    /^\d{4}-\d{1,2}-\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/,
     /^\d{1,2}\/\d{1,2}\/\d{2,4}$/,
     /^\d{1,2}-[A-Za-z]{3}-\d{2,4}$/,
     /^[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}$/,
@@ -214,10 +259,23 @@
     return neg ? -n : n;
   }
   function parseDateLike(v) {
-    if (v instanceof Date) return v;
+    if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
     const s = String(v).trim();
-    if (!s) return null;
-    if (!DATE_RES.some((re) => re.test(s))) return null;
+    if (!s || !DATE_RES.some((re) => re.test(s))) return null;
+    const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+    if (iso) {
+      const [, yy, mm, dd] = iso.map(Number);
+      const check = new Date(0);
+      check.setUTCHours(0, 0, 0, 0);
+      check.setUTCFullYear(yy, mm - 1, dd);
+      if (check.getUTCFullYear() !== yy || check.getUTCMonth() !== mm - 1 || check.getUTCDate() !== dd) return null;
+    }
+    const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s);
+    if (slash) {
+      const [, mm, dd] = slash.map(Number);
+      const check = new Date(s);
+      if (isNaN(check.getTime()) || check.getMonth() !== mm - 1 || check.getDate() !== dd) return null;
+    }
     const d = new Date(s.length <= 10 && /^\d{4}-\d{1,2}-\d{1,2}$/.test(s) ? s + 'T00:00:00' : s);
     return isNaN(d.getTime()) ? null : d;
   }
@@ -229,6 +287,10 @@
     const sample = nonEmpty.length > 800 ? nonEmpty.filter((_, i) => i % Math.ceil(nonEmpty.length / 800) === 0) : nonEmpty;
     const hit = (fn) => sample.filter(fn).length / sample.length;
     const lname = String(name || '').toLowerCase();
+    const postalOrCodeName = /(^|[\s_-])(zip|zipcode|postal|postalcode|code)([\s_-]|$)/.test(lname);
+    const identifierName = /(^|[\s_-])(id|identifier|uuid|guid|mrn|record\s*(number|no)|account\s*(number|no)|customer\s*(number|no))([\s_-]|$)/.test(lname);
+    if (postalOrCodeName) return 'category';
+    if (identifierName) return 'id';
 
     const dateHit = hit((v) => parseDateLike(v) !== null);
     if (dateHit > 0.85) return 'date';
@@ -242,8 +304,9 @@
     const numHit = hit((v) => NUMBER_RE.test(String(v)));
     if (numHit > 0.85) {
       const uniqVals = new Set(nonEmpty.map(String));
-      // zip / id-like numerics should be categories, not metrics
-      if (/(^|_|\s)(zip|postal|zipcode|id|code|year)($|_|\s)/.test(lname) && uniqVals.size < nonEmpty.length * 0.95) return 'category';
+      // Repeated years are useful as ordered groups; unique ID/code fields were
+      // classified before numeric inference above.
+      if (/(^|[\s_-])year([\s_-]|$)/.test(lname) && uniqVals.size < nonEmpty.length * 0.95) return 'category';
       if (/(price|amount|cost|revenue|premium|spend|paid|income|salary|value|fee|charge|balance)/.test(lname)) return 'currency';
       return 'number';
     }
@@ -314,7 +377,7 @@
 
   function histogram(vals, bins) {
     if (!vals.length) return [];
-    const mn = Math.min(...vals), mx = Math.max(...vals);
+    const { min: mn, max: mx } = minMax(vals);
     if (mn === mx) return [{ x0: mn, x1: mx, count: vals.length }];
     const w = (mx - mn) / bins;
     const out = Array.from({ length: bins }, (_, i) => ({ x0: mn + i * w, x1: mn + (i + 1) * w, count: 0 }));
@@ -383,7 +446,9 @@
         });
       }
     }
-    return out.filter((c) => Math.abs(c.r) >= minAbs).sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
+    return adjustPValues(out)
+      .filter((c) => Math.abs(c.r) >= minAbs)
+      .sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
   }
 
   function strengthLabel(a) {
@@ -435,15 +500,17 @@
         const tautological = ranges.length > 1 && disjoint / (ranges.length - 1) >= 0.9;
 
         results.push({
-          metric, driver: cat, eta2: stats.eta2, f: stats.f, p: stats.p,
+          metric, driver: cat, eta2: stats.eta2, omega2: stats.omega2, f: stats.f, p: stats.p,
           levels, overall, spread, tautological,
           spreadPct: overall ? (spread / Math.abs(overall)) * 100 : 0,
           top: levels[0], bottom: levels[levels.length - 1],
           n: sum(levels.map((l) => l.n)),
+          noiseEta2: stats.n > 1 ? (groups.length - 1) / (stats.n - 1) : 0,
         });
       }
     }
-    return results.filter((r) => !r.tautological).sort((a, b) => b.eta2 - a.eta2);
+    return adjustPValues(results.filter((r) => !r.tautological))
+      .sort((a, b) => b.eta2 - a.eta2);
   }
 
   // Categorical ↔ categorical associations
@@ -460,11 +527,13 @@
         if (a.length < 20) continue;
         const la = new Set(a).size, lb = new Set(b).size;
         if (la < 2 || lb < 2 || la > 30 || lb > 30) continue;
-        const { v, chi2, p } = cramersV(a, b);
-        if (v >= minV) out.push({ a: catCols[i], b: catCols[j], v, chi2, p, n: a.length, la, lb });
+        const stats = cramersV(a, b);
+        out.push({ a: catCols[i], b: catCols[j], ...stats, la, lb });
       }
     }
-    return out.sort((x, y) => y.v - x.v);
+    return adjustPValues(out)
+      .filter((c) => c.v >= minV)
+      .sort((x, y) => y.v - x.v);
   }
 
   // Cross-tab of two categoricals, optionally aggregating a metric
@@ -566,14 +635,18 @@
   }
 
   function seasonality(pts) {
-    if (pts.length < 21) return null;
+    if (pts.length < 56) return null;
     const dow = Array.from({ length: 7 }, () => []);
     const mon = Array.from({ length: 12 }, () => []);
     pts.forEach((p) => { dow[p.date.getDay()].push(p.value); mon[p.date.getMonth()].push(p.value); });
     const overall = mean(pts.map((p) => p.value));
     const dowStats = dow.map((a, i) => ({ label: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][i], n: a.length, mean: a.length ? mean(a) : 0, index: a.length && overall ? (mean(a) / overall) * 100 : 0 }));
-    const monStats = mon.map((a, i) => ({ label: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][i], n: a.length, mean: a.length ? mean(a) : 0, index: a.length && overall ? (mean(a) / overall) * 100 : 0 }));
-    return { dow: dowStats, month: monStats, overall };
+    const monthStats = mon.map((a, i) => ({ label: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][i], n: a.length, mean: a.length ? mean(a) : 0, index: a.length && overall ? (mean(a) / overall) * 100 : 0 }));
+    const spanDays = (pts[pts.length - 1].t - pts[0].t) / 86400000;
+    const enoughWeekdays = spanDays >= 56 && dow.every((a) => a.length >= 8);
+    const enoughMonths = spanDays >= 730 && monthStats.every((m) => m.n >= 2);
+    if (!enoughWeekdays && !enoughMonths) return null;
+    return { dow: enoughWeekdays ? dowStats : [], month: enoughMonths ? monthStats : [], overall, spanDays };
   }
 
   /* ---------------- concentration / pareto ---------------- */
@@ -594,12 +667,13 @@
   }
 
   /* ---------------- segment scan ---------------- */
-  // find single-condition segments that most over/under-perform on a metric
+  // Compare each segment with the rest of the dataset using Welch's t-test.
+  // P-values are BH-adjusted over the complete scan to limit false discoveries.
   function segmentScan(rows, catCols, metric, opts = {}) {
     const minN = Math.max(opts.minN || 5, Math.ceil(rows.length * 0.01));
     const all = num(rows.map((r) => parseNumberLike(r[metric])));
     if (all.length < 20) return [];
-    const gm = mean(all), gsd = sd(all);
+    const gm = mean(all), allSum = sum(all), allSq = sum(all.map((v) => v * v));
     const segs = [];
     for (const c of catCols) {
       const map = new Map();
@@ -610,18 +684,27 @@
         map.get(k).push(v);
       }
       for (const [k, vals] of map) {
-        if (vals.length < minN) continue;
-        const m = mean(vals);
-        const se = gsd / Math.sqrt(vals.length);
-        const z = se ? (m - gm) / se : 0;
+        const n1 = vals.length, n2 = all.length - n1;
+        if (n1 < minN || n2 < 2) continue;
+        const m1 = mean(vals), sum1 = sum(vals), sq1 = sum(vals.map((v) => v * v));
+        const m2 = (allSum - sum1) / n2;
+        const v1 = n1 > 1 ? variance(vals) : 0;
+        const ss2 = Math.max(0, allSq - sq1 - n2 * m2 * m2);
+        const v2 = n2 > 1 ? ss2 / (n2 - 1) : 0;
+        const a = v1 / n1, b = v2 / n2, se2 = a + b;
+        const diff = m1 - m2;
+        const t = se2 > 0 ? diff / Math.sqrt(se2) : diff === 0 ? 0 : Math.sign(diff) * Infinity;
+        const denom = (n1 > 1 ? (a * a) / (n1 - 1) : 0) + (n2 > 1 ? (b * b) / (n2 - 1) : 0);
+        const df = denom > 0 ? (se2 * se2) / denom : Infinity;
+        const p = !isFinite(t) ? 0 : !isFinite(df) ? (Math.abs(t) ? 0 : 1) : Math.max(0, Math.min(1, 2 * (1 - studentTCdf(Math.abs(t), df))));
         segs.push({
-          column: c, value: k, n: vals.length, mean: m, median: median(vals), sum: sum(vals),
-          lift: gm ? ((m - gm) / Math.abs(gm)) * 100 : 0, z,
-          share: (vals.length / rows.length) * 100,
+          column: c, value: k, n: n1, mean: m1, median: median(vals), sum: sum1,
+          lift: gm ? ((m1 - gm) / Math.abs(gm)) * 100 : 0, t, df, p,
+          share: (n1 / all.length) * 100,
         });
       }
     }
-    return segs.sort((a, b) => Math.abs(b.z) - Math.abs(a.z));
+    return adjustPValues(segs).sort((a, b) => Math.abs(b.t) - Math.abs(a.t));
   }
 
   /* ---------------- numeric binning for non-numeric drivers ---------------- */
@@ -646,14 +729,14 @@
      With enough rows, tiny effects appear purely by chance. These give the
      magnitude we'd expect from random data, so the UI can distinguish
      "found nothing" from "couldn't compute". */
-  function noiseFloor(n) {
+  function noiseFloor(n, groups = 3) {
     if (!n || n < 4) return { r: 1, eta2: 1, v: 1 };
-    const seR = 1 / Math.sqrt(n - 3);      // SE of Pearson r under the null
+    const seR = 1 / Math.sqrt(n - 3);      // approximate SE of Pearson r under the null
     return {
-      n,
-      r: 1.96 * seR,                        // |r| exceeded by 5% of random pairs
-      eta2: 2 / (n - 1),                    // ~E[eta2] for a 3-level split
-      v: 1.96 / Math.sqrt(n),               // rough Cramer's V chance level
+      n, groups,
+      r: 1.96 * seR,
+      eta2: Math.min(1, Math.max(0, (groups - 1) / (n - 1))),
+      v: 1.96 / Math.sqrt(n),
     };
   }
 
@@ -676,15 +759,16 @@
   }
   const fmtPct = (v, d = 1) => (isFinite(v) ? `${v >= 0 ? '' : ''}${v.toFixed(d)}%` : '—');
   const fmtP = (p) => (!isFinite(p) ? '—' : p < 0.001 ? 'p < 0.001' : `p = ${p.toFixed(3)}`);
+  const fmtQ = (q) => (!isFinite(q) ? '—' : q < 0.001 ? 'q < 0.001' : `q = ${q.toFixed(3)}`);
   const fmtDate = (d) => d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 
-  global.PrismaAnalysis = {
-    mean, median, sd, variance, quantile, sum, num, skewness, kurtosis,
+  global.TabulaMetricsAnalysis = {
+    mean, median, sd, variance, quantile, sum, num, minMax, adjustPValues, skewness, kurtosis,
     pearson, spearman, corrPValue, linreg, etaSquared, cramersV, histogram,
     inferType, parseNumberLike, parseDateLike, isNumericType, isGroupable,
     profileColumn, qualityReport, numericCorrelations, driverAnalysis,
     categoricalAssociations, crossTab, detectAnomalies, buildTimeSeries,
     movingAverage, forecast, seasonality, pareto, segmentScan, binNumeric,
-    strengthLabel, fmtNum, fmtPct, fmtP, fmtDate, noiseFloor,
+    strengthLabel, fmtNum, fmtPct, fmtP, fmtQ, fmtDate, noiseFloor,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

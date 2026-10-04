@@ -4,7 +4,7 @@ const SRC = path.join(__dirname, '..', 'src');
 const g = globalThis; g.window = g;
 g.performance = g.performance || { now: () => Date.now() };
 ['analysis.js', 'insights.js', 'parse.js'].forEach((f) => eval(fs.readFileSync(path.join(SRC, f), 'utf8')));
-const A = g.PrismaAnalysis, I = g.PrismaInsights, P = g.PrismaParse;
+const A = g.TabulaMetricsAnalysis, I = g.TabulaMetricsInsights, P = g.TabulaMetricsParse;
 
 function analyse(ds) {
   const { rows, columns } = ds;
@@ -16,12 +16,15 @@ function analyse(ds) {
   const catCols = profiles.filter((p) => A.isGroupable(p.type) && !p.constant && p.unique <= 60).map((p) => p.name);
   const dateCols = profiles.filter((p) => p.type === 'date' && p.dates && p.dates.length > 3).map((p) => p.name);
   const derivedCats = [];
-  numCols.forEach((c) => { if (catCols.length >= 25) return; const b = A.binNumeric(rows, c, 5); if (!b) return; const n = `${c} (quintile)`; rows.forEach((r) => { const v = A.parseNumberLike(r[c]); r[n] = isFinite(v) ? b.label(v) : ''; }); derivedCats.push(n); });
+  numCols.forEach((c) => { if (catCols.length + derivedCats.length >= 25) return; const b = A.binNumeric(rows, c, 5); if (!b) return; const n = `${c} (quintile)`; rows.forEach((r) => { const v = A.parseNumberLike(r[c]); r[n] = isFinite(v) ? b.label(v) : ''; }); derivedCats.push(n); });
   const allCats = [...catCols, ...derivedCats];
   const primaryMetric = I.pickPrimaryMetric(profiles);
-  const correlations = A.numericCorrelations(rows, numCols, .15);
-  const driverResults = A.driverAnalysis(rows, allCats, [...new Set([primaryMetric, ...numCols].filter(Boolean))].slice(0, 14)).filter((d) => d.eta2 > .005);
-  const catAssoc = A.categoricalAssociations(rows, catCols, .12);
+  const correlationsAll = A.numericCorrelations(rows, numCols, 0);
+  const correlations = correlationsAll.filter((c) => Math.abs(c.r) >= .15 && c.pAdj < .05);
+  const driverAll = A.driverAnalysis(rows, allCats, [...new Set([primaryMetric, ...numCols].filter(Boolean))].slice(0, 14));
+  const driverResults = driverAll.filter((d) => d.eta2 > .005 && d.pAdj < .05);
+  const catAssocAll = A.categoricalAssociations(rows, catCols, 0);
+  const catAssoc = catAssocAll.filter((c) => c.v >= .12 && c.chiSquareReliable && c.pAdj < .05);
   const anomalies = A.detectAnomalies(rows, profiles);
   const quality = A.qualityReport(profiles, rows);
   const segments = primaryMetric ? A.segmentScan(rows, allCats.filter((c) => c !== `${primaryMetric} (quintile)`), primaryMetric) : [];
@@ -32,7 +35,7 @@ function analyse(ds) {
     series = A.buildTimeSeries(rows, dateCol, primaryMetric, 'sum');
     if (series.length > 5) { const span = (series[series.length - 1].t - series[0].t) / 864e5; forecastResult = A.forecast(series, Math.max(14, Math.round(span * .25))); seasonal = A.seasonality(series); } else series = null;
   }
-  const ctx = { rows, columns, profiles, byName, typeOf, numCols, catCols: allCats, baseCats: catCols, dateCols, primaryMetric, correlations, driverResults, catAssoc, anomalies, quality, segments, paretoResults, series, forecastResult, seasonal, dateCol, domain: I.detectDomain(columns) };
+  const ctx = { rows, columns, profiles, byName, typeOf, numCols, catCols: allCats, baseCats: catCols, dateCols, primaryMetric, correlations, correlationsAll, driverResults, driverAll, catAssoc, catAssocAll, anomalies, quality, segments, paretoResults, noise: A.noiseFloor(rows.length), series, forecastResult, seasonal, dateCol, domain: I.detectDomain(columns) };
   ctx.findings = I.buildFindings(ctx); ctx.summary = I.buildSummary(ctx); ctx.actions = I.buildActions(ctx);
   return ctx;
 }

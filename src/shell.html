@@ -1,74 +1,159 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="daylight">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>PrismaStudio — Zero-Persistence Analytics</title>
-<meta name="description" content="Drop any spreadsheet and get drivers, correlations, segments, profiles, trends and projections — computed entirely in your browser. Nothing uploaded, nothing stored, no AI." />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234F6DF5'/%3E%3Cpath d='M8 22V14M16 22V8M24 22V17' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
+<title>TabulaMetrics — Zero-Persistence Analytics</title>
+<meta name="description" content="Analyze CSV, TSV and XLSX files locally in your browser. No file upload, server-side analysis or AI; theme preference is stored in the browser." />
+<!--__CSP__*/
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&amp;display=swap" rel="stylesheet" />
+<link rel="icon" type="image/png" href="data:image/png;base64,__TM_FAVICON__" />
 <style>/*__CSS__*/</style>
 </head>
 <body>
 
 <header class="appbar" id="appbar">
-  <div class="logo">◧</div>
-  <div class="brand">PrismaStudio</div>
+  <div class="brand-lockup" role="img" aria-label="TabulaMetrics">
+    <span class="logo" aria-hidden="true">
+      <img class="mark-daylight" src="data:image/png;base64,__TM_MARK_DAYLIGHT__" alt="" />
+      <img class="mark-sandstone" src="data:image/png;base64,__TM_MARK_SANDSTONE__" alt="" />
+      <img class="mark-ember" src="data:image/png;base64,__TM_MARK_EMBER__" alt="" />
+      <img class="mark-burgundy" src="data:image/png;base64,__TM_MARK_BURGUNDY__" alt="" />
+    </span>
+    <img class="brand-wordmark wordmark-daylight" src="data:image/png;base64,__TM_WORDMARK_DAYLIGHT__" alt="" />
+    <img class="brand-wordmark wordmark-sandstone" src="data:image/png;base64,__TM_WORDMARK_SANDSTONE__" alt="" />
+    <img class="brand-wordmark wordmark-ember" src="data:image/png;base64,__TM_WORDMARK_EMBER__" alt="" />
+    <img class="brand-wordmark wordmark-burgundy" src="data:image/png;base64,__TM_WORDMARK_BURGUNDY__" alt="" />
+  </div>
   <span class="badge"><span class="dot"></span>no-AI · zero-persistence</span>
   <div class="spacer"></div>
   <button class="btn hideoff" id="exportBtn">⬇ Export report</button>
-  <select id="themeSel" aria-label="Theme">
-    <option value="light">Light theme</option>
-    <option value="dark">Dark theme</option>
-    <option value="neon">Neon theme</option>
-    <option value="ocean">Ocean theme</option>
-    <option value="sunset">Sunset theme</option>
-    <option value="corporate">Corporate theme</option>
-    <option value="pastel">Pastel theme</option>
-    <option value="mono">Monochrome theme</option>
-  </select>
+  <div class="theme-control">
+    <span class="theme-mark" aria-hidden="true"><span></span></span>
+    <label for="themeSel">Theme</label>
+    <select id="themeSel" aria-label="Color theme" aria-describedby="themeHint">
+      <optgroup label="Light modes">
+        <option value="daylight">Daylight</option>
+        <option value="sandstone">Sandstone</option>
+      </optgroup>
+      <optgroup label="Dark modes">
+        <option value="ember">Ember</option>
+        <option value="burgundy">Burgundy</option>
+      </optgroup>
+    </select>
+    <span class="sr-only" id="themeHint">Choose between two light and two dark color themes.</span>
+  </div>
   <button class="btn hideoff" id="clearBtn">↺ Clear session</button>
 </header>
 
 <main class="wrap">
-  <div id="landing">
-    <section class="hero">
-      <h1>Drop your data.<br><span class="g">Get the whole picture.</span></h1>
-      <p>Drivers, correlations, segments, distributions, anomalies, trends and projections — every column profiled, every relationship tested. Computed 100% in your browser. Nothing is uploaded, stored, or sent to any AI.</p>
+  <div id="landing" class="landing-page">
+    <section class="home-workspace" aria-labelledby="heroTitle">
+      <aside class="home-sidebar" aria-label="Choose a dataset">
+        <div class="home-side-head">
+          <span class="side-eyebrow"><i aria-hidden="true"></i> LOCAL WORKSPACE</span>
+          <h2>Start with a file</h2>
+          <p>Your spreadsheet stays on this device.</p>
+        </div>
+        <div class="dropzone home-dropzone" id="dropzone" tabindex="0" role="button" aria-label="Choose or drop a data file">
+          <div class="dz-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 14v5h14v-5"/></svg></div>
+          <div class="upload-copy">
+            <div class="eyebrow">PRIVATE BY DEFAULT</div>
+            <div class="dz-title">Drop a dataset to begin</div>
+            <p class="dim">or <b>browse files</b></p>
+          </div>
+          <div class="chips">
+            <span class="chip">CSV</span><span class="chip">TSV</span><span class="chip">XLSX</span>
+          </div>
+          <span class="upload-footnote">A local sensitive-data check may ask you to confirm before analysis.</span>
+        </div>
+        <div class="samples home-samples" aria-label="Try a sample dataset">
+          <span class="sample-label">OR EXPLORE A SAMPLE</span>
+          <button class="btn" id="sampleBtn" type="button"><span aria-hidden="true">↗</span> Sales over time</button>
+          <button class="btn" id="sampleInsuranceBtn" type="button"><span aria-hidden="true">↗</span> Auto insurance</button>
+        </div>
+        <div class="home-local-card">
+          <span class="home-lock" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M6 10h12v10H6zM8.5 10V7.5a3.5 3.5 0 0 1 7 0V10"/><path d="M12 14v2"/></svg></span>
+          <div><strong>Local, by design</strong><span>No account · no AI · no upload</span></div>
+          <span class="home-live-dot" aria-label="Ready"></span>
+        </div>
+        <p class="home-limit">50 MiB max · Analysis runs in your browser memory.</p>
+      </aside>
+
+      <div class="home-main">
+        <header class="home-welcome">
+          <div class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span> TABULAMETRICS · ANALYSIS STUDIO</div>
+          <h1 id="heroTitle">Know what matters<br><span class="g">in your data.</span></h1>
+          <p>Explore the patterns behind your numbers with clear statistical results—without sending your file anywhere.</p>
+          <div class="hero-points" aria-label="Privacy and access">
+            <span><b>01</b> Private by default</span>
+            <span><b>02</b> Works offline</span>
+            <span><b>03</b> No account</span>
+          </div>
+        </header>
+
+        <section class="home-metrics" aria-label="Analysis capabilities">
+          <article class="home-metric-card"><span class="home-metric-icon icon-teal" aria-hidden="true">↗</span><div><span>GROUP DIFFERENCES</span><strong>Drivers &amp; segments</strong><small>Compare groups with adjusted tests</small></div></article>
+          <article class="home-metric-card"><span class="home-metric-icon icon-blue" aria-hidden="true">⇄</span><div><span>FIELD CONNECTIONS</span><strong>Relationships</strong><small>Inspect numeric and categorical links</small></div></article>
+          <article class="home-metric-card"><span class="home-metric-icon icon-amber" aria-hidden="true">▤</span><div><span>DATA HEALTH</span><strong>Profiles &amp; quality</strong><small>Find gaps, outliers and patterns</small></div></article>
+          <article class="home-metric-card"><span class="home-metric-icon icon-rose" aria-hidden="true">⌁</span><div><span>CHANGE OVER TIME</span><strong>Trends &amp; forecasts</strong><small>Only when your data supports them</small></div></article>
+        </section>
+
+        <div class="home-dashboard-grid">
+          <section class="home-preview-card" aria-labelledby="previewTitle">
+            <div class="home-card-head"><div><span class="side-eyebrow">REPORT PREVIEW</span><h2 id="previewTitle">Analysis snapshot</h2><p>Real results appear when you add data.</p></div><span class="awaiting-chip"><i aria-hidden="true"></i> AWAITING DATA</span></div>
+            <div class="empty-chart-panel" role="img" aria-label="Empty chart preview. Add a file to see patterns from your data.">
+              <svg class="empty-chart-grid" viewBox="0 0 720 190" preserveAspectRatio="none" aria-hidden="true"><path d="M40 22H710M40 62H710M40 102H710M40 142H710M40 182H710M40 22V182M174 22V182M308 22V182M442 22V182M576 22V182M710 22V182"/></svg>
+              <div class="empty-chart-message"><span class="empty-chart-glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4 19V5m0 14h16M7 15l4-4 3 2 5-6"/><circle cx="19" cy="7" r="1.5"/></svg></span><strong>Your first signal starts here</strong><span>Choose a file or load a sample to build the report.</span></div>
+            </div>
+            <div class="preview-legend"><span><i class="legend-dot"></i> Data-derived charts</span><span>Nothing shown until a dataset is selected</span></div>
+          </section>
+          <aside class="home-report-card" aria-label="Included in your report">
+            <div class="home-card-head compact"><div><span class="side-eyebrow">WHAT YOU’LL GET</span><h2>One clear report</h2></div><span class="report-count">09</span></div>
+            <div class="home-report-list">
+              <div><span class="report-symbol">✦</span><span><b>Ranked findings</b><small>With caveats and next steps</small></span><i>01</i></div>
+              <div><span class="report-symbol">↗</span><span><b>Drivers &amp; segments</b><small>Effect sizes and adjusted tests</small></span><i>02</i></div>
+              <div><span class="report-symbol">⇄</span><span><b>Relationships</b><small>Numeric and category associations</small></span><i>03</i></div>
+              <div><span class="report-symbol">▥</span><span><b>Profiles &amp; trends</b><small>Quality, distributions and time</small></span><i>04</i></div>
+            </div>
+          </aside>
+        </div>
+
+        <section class="home-data-card" aria-labelledby="dataPreviewTitle">
+          <div class="home-card-head"><div><span class="side-eyebrow">DATA STAYS IN MEMORY</span><h2 id="dataPreviewTitle">Data preview</h2></div><span class="preview-note-chip">Your rows, not a demo</span></div>
+          <div class="empty-table-preview" aria-hidden="true">
+            <div class="empty-table-row empty-table-head"><span>FIELD</span><span>TYPE</span><span>EXAMPLE VALUE</span><span>STATUS</span></div>
+            <div class="empty-table-row"><span><i></i></span><span><i></i></span><span><i></i></span><span><i></i></span></div>
+            <div class="empty-table-row"><span><i></i></span><span><i></i></span><span><i></i></span><span><i></i></span></div>
+          </div>
+          <p class="empty-table-caption">No file selected. Add a dataset to see a private, local preview.</p>
+        </section>
+      </div>
     </section>
 
-    <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload a data file">
-      <div class="dz-icon">⬆</div>
-      <div class="dz-title">Drag &amp; drop a file here</div>
-      <p class="dim">or click to browse — you can also paste CSV from your clipboard (Ctrl+V)</p>
-      <div class="chips">
-        <span class="chip">CSV</span><span class="chip">TSV</span><span class="chip">XLSX</span>
-        <span class="chip">max 50 MB</span><span class="chip">health data auto-blocked</span>
+    <aside class="privacy-band" aria-labelledby="privacyTitle">
+      <div class="privacy-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3 19 6v5c0 4.6-2.9 8-7 10-4.1-2-7-5.4-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/></svg></div>
+      <div class="privacy-copy">
+        <span class="privacy-label">PRIVACY, BUILT IN</span>
+        <h2 id="privacyTitle">Your file stays yours.</h2>
+        <p class="guarantee">Files are parsed and analyzed in browser memory. This app does not upload or persist their contents; only your theme preference is saved in localStorage.</p>
+        <p class="privacy-detail">The local sensitive-data heuristic can ask you to confirm, but it is not a PHI detector or security boundary. If hosted, the web host may log ordinary page-request metadata.</p>
       </div>
-    </div>
-    <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xlsm" style="display:none" />
-
-    <div class="samples">
-      <button class="btn" id="sampleBtn">✨ Try sales sample (time series)</button>
-      <button class="btn" id="sampleInsuranceBtn">🚗 Try auto-insurance sample (45 columns)</button>
-    </div>
-
-    <div class="featgrid">
-      <div class="feat"><span class="fi">🎯</span><h4>Driver analysis</h4><p>One-way ANOVA with η² effect sizes ranks which categorical fields actually move each metric — the core of any wide, category-heavy dataset.</p></div>
-      <div class="feat"><span class="fi">🔗</span><h4>Relationship testing</h4><p>Pearson r, Spearman ρ, significance tests and a full correlation matrix for numerics; Cramér's V and chi-square for categoricals.</p></div>
-      <div class="feat"><span class="fi">🧭</span><h4>Segment scan</h4><p>Every value of every category ranked by how far it deviates from the average, size-adjusted so small segments don't produce false alarms.</p></div>
-      <div class="feat"><span class="fi">📚</span><h4>Full column profiles</h4><p>Quartiles, skew, kurtosis, CV, histograms, entropy balance and completeness for all columns — not just the two the tool liked best.</p></div>
-      <div class="feat"><span class="fi">🔬</span><h4>Interactive explorer</h4><p>Pivot any two fields, box-plot any metric by any group, scatter any pair. The analysis follows your questions.</p></div>
-      <div class="feat"><span class="fi">🔒</span><h4>Zero persistence</h4><p>In-memory only. No uploads, no cookies, no analytics, no AI. Only your theme preference is remembered.</p></div>
-    </div>
-
-    <p class="guarantee"><b>Zero-persistence guarantee:</b> all analysis runs in-memory in your browser — nothing is uploaded, stored, or sent to any service. Sessions clear when you close the tab. Only your theme preference is kept in localStorage. Health/medical data is auto-blocked.</p>
+      <div class="privacy-stamp" aria-hidden="true">
+        <span class="privacy-orb" aria-hidden="true"><span></span></span>
+        <b>LOCAL</b><small>BY DESIGN</small>
+      </div>
+    </aside>
   </div>
 
+  <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xlsm" style="display:none" />
   <div id="dashboard" style="display:none"></div>
 </main>
 
 <div id="modalRoot"></div>
-<div class="busy" id="busy"><div class="busybox"><div class="spin"></div><div id="busyMsg">Working…</div></div></div>
+<div class="busy" id="busy"><div class="busybox"><div class="spin"></div><div id="busyMsg">Working…</div><button class="btn mt-s" id="busyCancel">Cancel</button></div></div>
 <div class="toast" id="toast"></div>
 
 <script>/*__JS__*/</script>

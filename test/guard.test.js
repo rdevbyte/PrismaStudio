@@ -6,7 +6,7 @@ const g = globalThis;
 g.window = g;
 g.performance = g.performance || { now: () => Date.now() };
 eval(fs.readFileSync(path.join(__dirname, '..', 'src', 'parse.js'), 'utf8'));
-const P = g.PrismaParse;
+const P = g.TabulaMetricsParse;
 
 let fails = 0;
 function t(name, cols, rows, expect) {
@@ -43,14 +43,15 @@ t('hospital as employer value', ['employer', 'salary'], [{ employer: 'Mercy Hosp
 t('trophies / Delphi', ['trophies', 'Delphi'], null, false);
 t('impatient_flag substring', ['impatient_flag', 'score'], null, false);
 
-console.log('\nOVERRIDE declarations');
-t('No PHI note in row 1', ['patient_name', 'diagnosis'], [{ patient_name: 'No PHI - synthetic', diagnosis: 'x' }], false);
-t('de-identified', ['mrn', 'icd-10'], [{ mrn: 'de-identified export', 'icd-10': 'x' }], false);
-// declaration far down the file must still be honoured
+console.log('\nDECLARATION PHRASES ARE HINTS, NOT OVERRIDES');
+t('incidental sample-data phrase cannot bypass patient header', ['patient_name', 'diagnosis'], [{ patient_name: 'sample data', diagnosis: 'x' }], true);
+t('de-identified text cannot bypass MRN and ICD headers', ['mrn', 'icd-10'], [{ mrn: 'de-identified export', 'icd-10': 'x' }], true);
+t('unrelated synthetic phrase cannot bypass an MRN body value', ['record', 'score'], [{ record: 'synthetic test data', score: 'MRN 12345' }], true);
+// Strong identifiers are scanned after row 60, even with generic headers.
 const many = [];
-for (let i = 0; i < 300; i++) many.push({ student: 'S' + i, diagnosis: 'x', score: '1' });
-many.push({ student: 'No PHI', diagnosis: '', score: '' });
-t('No PHI at row 301', ['student', 'diagnosis', 'score'], many, false);
+for (let i = 0; i < 300; i++) many.push({ field_a: 'row ' + i, field_b: 'ordinary', field_c: i });
+many.push({ field_a: 'late record', field_b: 'MRN 12345', field_c: 301 });
+t('MRN in row 301 is detected', ['field_a', 'field_b', 'field_c'], many, true);
 
 console.log(fails ? `\nFAILURES: ${fails}` : '\nAll PHI guard cases passed.');
 process.exit(fails ? 1 : 0);

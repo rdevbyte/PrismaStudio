@@ -14,7 +14,7 @@ const rectsOverlap = (a, b) => !(a.x + a.w <= b.x + 0.5 || b.x + b.w <= a.x + 0.
   page.on('console', (m) => { if (m.type() === 'error') errors.push('CONSOLE: ' + m.text()); });
 
   await page.goto('file://' + path.join(__dirname, '..', 'dist', 'index.html'));
-  const gsapOk = await page.evaluate(() => !!window.gsap && !!window.PrismaAnim && window.PrismaAnim.enabled);
+  const gsapOk = await page.evaluate(() => !!window.gsap && !!window.TabulaMetricsAnim && window.TabulaMetricsAnim.enabled);
   console.log('GSAP loaded & enabled:', gsapOk);
 
   await page.click('#sampleInsuranceBtn');
@@ -104,7 +104,7 @@ const rectsOverlap = (a, b) => !(a.x + a.w <= b.x + 0.5 || b.x + b.w <= a.x + 0.
     svg.dataset.animated = '';
     const bar = svg.querySelector('rect[data-bar]');
     const target = +bar.dataset.w;
-    window.PrismaAnim.animateSvg(svg);
+    window.TabulaMetricsAnim.animateSvg(svg);
     // sample on the very next frame — the tween should still be near zero
     const w0 = await new Promise((r) => requestAnimationFrame(() => r(+bar.getAttribute('width'))));
     await new Promise((r) => setTimeout(r, 300));
@@ -138,7 +138,7 @@ const rectsOverlap = (a, b) => !(a.x + a.w <= b.x + 0.5 || b.x + b.w <= a.x + 0.
   await p2.waitForSelector('.kpis');
   await p2.waitForTimeout(600);
   const rm = await p2.evaluate(() => ({
-    enabled: window.PrismaAnim.enabled,
+    enabled: window.TabulaMetricsAnim.enabled,
     kpiVisible: getComputedStyle(document.querySelector('.kpi')).opacity,
     kpiText: document.querySelector('.kvalue').textContent,
     cardsVisible: [...document.querySelectorAll('#tab-findings .finding')].every((c) => getComputedStyle(c).opacity === '1'),

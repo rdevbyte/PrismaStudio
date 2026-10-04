@@ -1,32 +1,40 @@
 /* ============================================================
-   PrismaStudio — Application shell & dashboard renderer
+   TabulaMetrics — Application shell & dashboard renderer
    ============================================================ */
 (function (global) {
   'use strict';
-  const A = global.PrismaAnalysis, I = global.PrismaInsights, C = global.PrismaCharts, P = global.PrismaParse;
-  const { fmtNum, fmtPct, fmtP, fmtDate } = A;
+  const A = global.TabulaMetricsAnalysis, I = global.TabulaMetricsInsights, C = global.TabulaMetricsCharts, P = global.TabulaMetricsParse;
+  const Pipeline = global.TabulaMetricsPipeline;
+  const { fmtNum, fmtPct, fmtP, fmtQ, fmtDate } = A;
   const esc = I.esc, trunc = I.trunc;
+  const WORKER_SOURCE = global.__TABULAMETRICS_WORKER_SOURCE__ || null;
+  const MAX_FILE_BYTES = 50 * 1024 * 1024;
+  const MAX_PASTE_CHARS = 50 * 1024 * 1024;
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const el = (id) => document.getElementById(id);
 
   const STATE = {
-    dataset: null, types: {}, analysis: null, filters: {}, pivot: {}, explore: {},
-    attestation: null, pendingScan: null, pendingDataset: null,
+    dataset: null, types: Object.create(null), analysis: null, filters: {}, pivot: {}, explore: {},
+    attestation: null, pendingScan: null, pendingDataset: null, pendingTypes: null,
+    worker: null, workerUrl: null, taskId: 0,
   };
 
   /* ================= theming ================= */
-  const THEMES = ['light', 'dark', 'neon', 'ocean', 'sunset', 'corporate', 'pastel', 'mono'];
-  function setTheme(t) {
+  const THEMES = ['daylight', 'sandstone', 'ember', 'burgundy'];
+  const LEGACY_THEMES = { light: 'daylight', dark: 'ember', neon: 'ember', ocean: 'sandstone', sunset: 'daylight', corporate: 'daylight', pastel: 'sandstone', mono: 'daylight', lavender: 'sandstone', midnight: 'ember', evergreen: 'burgundy' };
+  function setTheme(theme) {
+    const t = THEMES.includes(theme) ? theme : (LEGACY_THEMES[theme] || 'daylight');
     document.documentElement.setAttribute('data-theme', t);
-    try { localStorage.setItem('prisma-theme', t); } catch (e) { }
+    const sel = el('themeSel');
+    if (sel && sel.value !== t) sel.value = t;
+    try { localStorage.setItem('tabulametrics-theme', t); } catch (e) { }
   }
 
   /* ================= boot ================= */
   function boot() {
-    try { setTheme(localStorage.getItem('prisma-theme') || 'light'); } catch (e) { setTheme('light'); }
+    try { setTheme(localStorage.getItem('tabulametrics-theme') || 'daylight'); } catch (e) { setTheme('daylight'); }
     const sel = el('themeSel');
-    sel.value = document.documentElement.getAttribute('data-theme');
     sel.addEventListener('change', () => setTheme(sel.value));
 
     const drop = el('dropzone'), input = el('fileInput');
@@ -39,16 +47,19 @@
     document.addEventListener('paste', (e) => {
       if (STATE.dataset) return;
       const txt = (e.clipboardData || window.clipboardData).getData('text');
-      if (txt && txt.trim().length > 20 && /[,\t;|]/.test(txt)) loadDataset(P.parseText(txt));
+      if (!txt || txt.trim().length <= 20 || !/[,\t;|]/.test(txt)) return;
+      if (txt.length > MAX_PASTE_CHARS) return showError('Pasted data is too large', 'Maximum pasted text is 50 MiB. Save it as a file and filter it before importing.');
+      processPaste(txt);
     });
     el('sampleBtn').addEventListener('click', loadSample);
     el('sampleInsuranceBtn').addEventListener('click', loadInsuranceSample);
     el('clearBtn').addEventListener('click', clearSession);
     el('exportBtn').addEventListener('click', exportReport);
+    el('busyCancel').addEventListener('click', cancelCurrentTask);
   }
 
   function animateKpis() {
-    if (!global.PrismaAnim || !global.PrismaAnim.enabled) return;
+    if (!global.TabulaMetricsAnim || !global.TabulaMetricsAnim.enabled) return;
     $$('.kvalue').forEach((node) => {
       const raw = node.textContent.trim();
       // only count up pure numeric/percent/currency values
@@ -57,7 +68,7 @@
       const [, sign, cur, digits, suffix] = m;
       const target = parseFloat(digits.replace(/,/g, '')) * (sign === '-' ? -1 : 1);
       const decimals = (digits.split('.')[1] || '').length;
-      global.PrismaAnim.countUp(node, target, (v) => {
+      global.TabulaMetricsAnim.countUp(node, target, (v) => {
         const s = Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
         return (v < 0 ? '-' : sign === '+' ? '+' : '') + cur + s + (suffix || '');
       });
@@ -71,53 +82,155 @@
   }
 
   /* ================= file handling ================= */
-  async function handleFile(file) {
-    if (file.size > 60 * 1024 * 1024) return showError('File too large', 'Maximum size is 50 MB. Try filtering the data or splitting the file.');
-    showBusy('Parsing ' + file.name + '…');
-    try {
-      const ds = await P.parseFile(file);
-      loadDataset(ds);
-    } catch (err) {
-      hideBusy();
-      showError('Could not read that file', err.message || String(err));
-    }
+  function handleFile(file) {
+    if (file.size > MAX_FILE_BYTES) return showError('File too large', 'Maximum file size is 50 MiB. Try filtering the data or splitting the file.');
+    showBusy('Reading and parsing file…');
+    const started = dispatchWorker('parse-file', { file }, showBusy, (data) => {
+      if (data.type === 'error') { hideBusy(); return showError('Could not read that file', data.message); }
+      acceptPrepared(data.dataset, data.scan, data.types);
+    }, (error, id) => fallbackPrepare('parse-file', { file }, id));
+    if (!started) fallbackPrepare('parse-file', { file }, STATE.taskId);
+  }
+
+  function processPaste(text) {
+    showBusy('Parsing pasted data…');
+    const payload = { text, name: 'pasted-data.csv' };
+    const started = dispatchWorker('parse-text', payload, showBusy, (data) => {
+      if (data.type === 'error') { hideBusy(); return showError('Could not read pasted data', data.message); }
+      acceptPrepared(data.dataset, data.scan, data.types);
+    }, (error, id) => fallbackPrepare('parse-text', payload, id));
+    if (!started) fallbackPrepare('parse-text', payload, STATE.taskId);
   }
 
   function loadDataset(ds) {
-    const scan = P.healthScan(ds.columns, ds.rows);
-    if (scan.blocked) {
-      hideBusy();
-      // Hold the parsed data in memory (never on disk) so the user can either
-      // cancel — which discards it — or attest and continue without re-uploading.
-      STATE.pendingDataset = ds;
-      return showHealthBlock(scan);
-    }
-    acceptDataset(ds, scan.override);
+    STATE.attestation = null;
+    STATE.pendingScan = null;
+    STATE.pendingDataset = null;
+    STATE.pendingTypes = null;
+    showBusy('Checking the dataset…');
+    const payload = { dataset: ds };
+    const started = dispatchWorker('prepare-dataset', payload, showBusy, (data) => {
+      if (data.type === 'error') { hideBusy(); return showError('Could not prepare that dataset', data.message); }
+      acceptPrepared(data.dataset, data.scan, data.types);
+    }, (error, id) => fallbackPrepare('prepare-dataset', payload, id));
+    if (!started) fallbackPrepare('prepare-dataset', payload, STATE.taskId);
   }
 
-  function acceptDataset(ds, override) {
-    STATE.dataset = ds;
-    STATE.types = {};
-    ds.columns.forEach((c) => { STATE.types[c] = A.inferType(ds.rows.map((r) => r[c]), c); });
+  function cancelWorker() {
+    STATE.taskId++;
+    if (STATE.worker) STATE.worker.terminate();
+    if (STATE.workerUrl) URL.revokeObjectURL(STATE.workerUrl);
+    STATE.worker = null;
+    STATE.workerUrl = null;
+  }
+
+  function dispatchWorker(task, payload, onProgress, onComplete, onCrash) {
+    cancelWorker();
+    const id = STATE.taskId;
+    if (!WORKER_SOURCE || typeof global.Worker !== 'function' || typeof global.Blob !== 'function' || !global.URL || !URL.createObjectURL) return false;
+    let worker, url;
+    try {
+      url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }));
+      worker = new global.Worker(url);
+    } catch (error) {
+      if (url) URL.revokeObjectURL(url);
+      return false;
+    }
+    STATE.worker = worker;
+    STATE.workerUrl = url;
+    const release = () => {
+      if (STATE.worker !== worker) return;
+      worker.terminate();
+      URL.revokeObjectURL(url);
+      STATE.worker = null;
+      STATE.workerUrl = null;
+    };
+    worker.onmessage = (event) => {
+      const data = event.data || {};
+      if (id !== STATE.taskId || data.id !== id || STATE.worker !== worker) return;
+      if (data.type === 'progress') { onProgress(data.message); return; }
+      release();
+      onComplete(data);
+    };
+    worker.onerror = (event) => {
+      if (id !== STATE.taskId || STATE.worker !== worker) return;
+      event.preventDefault();
+      release();
+      onCrash(new Error(event.message || 'The background worker stopped unexpectedly.'), id);
+    };
+    try { worker.postMessage({ id, task, payload }); }
+    catch (error) {
+      release();
+      onCrash(error, id);
+    }
+    return true;
+  }
+
+  async function fallbackPrepare(task, payload, id) {
+    try {
+      let ds;
+      if (task === 'parse-file') ds = await P.parseFile(payload.file);
+      else if (task === 'parse-text') ds = P.parseText(payload.text, payload.name);
+      else ds = payload.dataset;
+      if (id !== STATE.taskId) return;
+      showBusy('Checking column names and data for sensitive-data indicators…');
+      const scan = P.healthScan(ds.columns, ds.rows);
+      const types = Object.create(null);
+      for (const column of ds.columns) types[column] = A.inferType(ds.rows.map((row) => row[column]), column);
+      if (id === STATE.taskId) acceptPrepared(ds, scan, types);
+    } catch (error) {
+      if (id !== STATE.taskId) return;
+      hideBusy();
+      showError('Could not read that data', error.message || String(error));
+    }
+  }
+
+  function acceptPrepared(ds, scan, types) {
     hideBusy();
-    renderPreview(override);
+    STATE.pendingScan = scan;
+    if (scan.blocked) {
+      // Keep the parsed file in memory only while the user decides whether to
+      // discard it or explicitly attest that it contains no PHI.
+      STATE.pendingDataset = ds;
+      STATE.pendingTypes = types;
+      return showHealthBlock(scan);
+    }
+    STATE.pendingDataset = null;
+    STATE.pendingTypes = null;
+    acceptDataset(ds, types);
+  }
+
+  function acceptDataset(ds, types) {
+    STATE.dataset = ds;
+    STATE.types = Object.assign(Object.create(null), types || {});
+    if (!types) ds.columns.forEach((c) => { STATE.types[c] = A.inferType(ds.rows.map((r) => r[c]), c); });
+    hideBusy();
+    renderPreview();
   }
 
   function showBusy(msg) { el('busy').style.display = 'flex'; el('busyMsg').textContent = msg; }
   function hideBusy() { el('busy').style.display = 'none'; }
+  function cancelCurrentTask() {
+    cancelWorker();
+    hideBusy();
+    if (STATE.dataset && !STATE.analysis) renderPreview();
+    toast('Operation canceled. Data remains only in this browser session.');
+  }
 
   function showError(title, msg) {
-    el('modalRoot').innerHTML = `<div class="modal-bg"><div class="modal"><div class="modal-icon err">!</div><h3>${esc(title)}</h3><p>${esc(msg)}</p><div class="modal-actions"><button class="btn primary" onclick="document.getElementById('modalRoot').innerHTML=''">Got it</button></div></div></div>`;
+    el('modalRoot').innerHTML = `<div class="modal-bg"><div class="modal"><div class="modal-icon err">!</div><h3>${esc(title)}</h3><p>${esc(msg)}</p><div class="modal-actions"><button class="btn primary" id="errorDismiss">Got it</button></div></div></div>`;
+    el('errorDismiss').addEventListener('click', () => { el('modalRoot').innerHTML = ''; });
   }
   function showHealthBlock(scan) {
     const terms = scan.terms || [];
     STATE.pendingScan = scan;
     el('modalRoot').innerHTML = `<div class="modal-bg"><div class="modal"><div class="modal-icon err">\u26d4</div>
-      <h3>This file looks like health data</h3>
-      <p>PrismaStudio does not process protected health information. The file has <b>not</b> been analysed and is still only in your browser's memory.</p>
+      <h3>This file may contain health data</h3>
+      <p>The local heuristic found clinical terms. The file has <b>not</b> been statistically analysed and remains only in your browser's memory. This detector is not a reliable PHI classifier; do not use it as a guarantee that sensitive data is safe to process.</p>
       <p class="dim small">Matched: ${terms.map((t) => `\u201c${esc(t)}\u201d`).join(', ') || 'clinical terminology'}</p>
+      ${scan.declarationHint ? '<div class="note warn">A possible no-PHI or de-identification phrase appears in the file. It is only file text, not proof, and does not bypass this confirmation.</div>' : ''}
 
-      <div class="note">If this is a <b>false positive</b> \u2014 for example a school, HR or insurance file that happens to use a clinical-sounding word \u2014 you can confirm below and continue.</div>
+      <div class="note">If this is a <b>false positive</b> and you have verified that the file contains no protected health information, confirm below to continue. Otherwise cancel to discard it.</div>
 
       <label class="attest">
         <input type="checkbox" id="attestBox" />
@@ -128,32 +241,32 @@
         <button class="btn" id="hbCancel">Cancel</button>
         <button class="btn primary" id="hbProceed" disabled>Analyse anyway</button>
       </div>
-      <p class="dim small mt-s">Analysis runs entirely in your browser either way \u2014 nothing is uploaded or stored.</p>
+      <p class="dim small mt-s">Analysis runs in your browser. The app does not upload or persist file contents; they remain in this session's memory.</p>
     </div></div>`;
-    if (global.PrismaAnim) global.PrismaAnim.modalIn($('.modal'));
+    if (global.TabulaMetricsAnim) global.TabulaMetricsAnim.modalIn($('.modal'));
     const box = el('attestBox'), go = el('hbProceed');
     box.addEventListener('change', () => { go.disabled = !box.checked; });
     el('hbCancel').addEventListener('click', () => {
       el('modalRoot').innerHTML = '';
-      STATE.dataset = null; STATE.pendingScan = null; STATE.pendingDataset = null;
+      STATE.dataset = null; STATE.pendingScan = null; STATE.pendingDataset = null; STATE.pendingTypes = null;
       el('fileInput').value = '';
     });
     go.addEventListener('click', () => {
       if (!box.checked) return;
       // Record the attestation in-memory for this session only, so the report
-      // and any export carry a visible note of who bypassed the guard and when.
-      const ds = STATE.pendingDataset;
+      // and any export show when it was made, the filename, and matched terms.
+      const ds = STATE.pendingDataset, types = STATE.pendingTypes;
       STATE.attestation = { at: new Date().toISOString(), terms, file: ds && ds.name };
-      STATE.pendingDataset = null;
+      STATE.pendingDataset = null; STATE.pendingTypes = null;
       el('modalRoot').innerHTML = '';
-      if (ds) acceptDataset(ds, false);
+      if (ds) acceptDataset(ds, types);
     });
   }
 
   /* ================= preview & type editor ================= */
   const TYPE_OPTIONS = ['number', 'currency', 'percent', 'date', 'category', 'boolean', 'text', 'id'];
 
-  function renderPreview(override) {
+  function renderPreview() {
     const ds = STATE.dataset;
     const cols = ds.columns;
     const head = cols.map((c) => `<th><div class="ph">${esc(c)}</div>
@@ -164,13 +277,13 @@
     el('modalRoot').innerHTML = `<div class="modal-bg"><div class="modal wide">
       <h3>Preview: ${esc(ds.name)}</h3>
       <p class="dim small">${ds.rows.length.toLocaleString()} rows × ${cols.length} columns · parsed in ${ds.parseMs}ms${ds.sheetName ? ` · sheet “${esc(ds.sheetName)}”` : ''}${ds.headerRow ? ` · header found on row ${ds.headerRow + 1}` : ''}</p>
-      ${override ? '<div class="note ok">“No PHI” declaration detected — processed locally, nothing stored.</div>' : ''}
+      ${STATE.attestation ? '<div class="note ok">You confirmed that this file contains no protected health information. The detector is heuristic and cannot verify that claim; analysis remains local to this browser session.</div>' : ''}
       <div class="chips">${Object.entries(counts).map(([t, n]) => `<span class="chip">${n} ${t}</span>`).join('')}</div>
       <div class="tablewrap preview"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
       <p class="dim small">Types drive the whole report: numeric columns become metrics, categories become drivers and segments, dates unlock trends. Adjust anything that looks wrong.</p>
       <div class="modal-actions"><button class="btn" id="cancelBtn">Cancel</button><button class="btn primary" id="analyzeBtn">Analyse →</button></div>
     </div></div>`;
-    if (global.PrismaAnim) global.PrismaAnim.modalIn($('.modal'));
+    if (global.TabulaMetricsAnim) global.TabulaMetricsAnim.modalIn($('.modal'));
     $$('.typesel').forEach((s) => s.addEventListener('change', () => { STATE.types[s.dataset.col] = s.value; }));
     el('cancelBtn').addEventListener('click', () => { el('modalRoot').innerHTML = ''; STATE.dataset = null; });
     el('analyzeBtn').addEventListener('click', () => { el('modalRoot').innerHTML = ''; runAnalysis(); });
@@ -179,100 +292,40 @@
   /* ================= analysis orchestration ================= */
   function runAnalysis() {
     showBusy('Analysing…');
+    const payload = { dataset: STATE.dataset, types: STATE.types };
+    const started = dispatchWorker('analyse', payload, showBusy, (data) => {
+      if (data.type === 'error') {
+        hideBusy();
+        return showError('Analysis failed', data.message);
+      }
+      STATE.analysis = hydrateAnalysis(data.result);
+      hideBusy();
+      renderDashboard();
+    }, (error, id) => fallbackAnalysis(payload, id));
+    if (!started) fallbackAnalysis(payload, STATE.taskId);
+  }
+
+  function fallbackAnalysis(payload, id) {
     setTimeout(() => {
+      if (id !== STATE.taskId) return;
       try {
-        STATE.analysis = analyse(STATE.dataset, STATE.types);
+        STATE.analysis = hydrateAnalysis(Pipeline.analyse(payload.dataset, payload.types));
         hideBusy();
         renderDashboard();
-      } catch (err) {
-        hideBusy(); console.error(err);
-        showError('Analysis failed', err.message || String(err));
+      } catch (error) {
+        hideBusy();
+        console.error(error);
+        showError('Analysis failed', error.message || String(error));
       }
     }, 30);
   }
 
-  function analyse(ds, types) {
-    const t0 = performance.now();
-    const rows = ds.rows, columns = ds.columns;
-    const profiles = columns.map((c) => A.profileColumn(c, rows.map((r) => r[c]), types[c]));
-    const byName = Object.fromEntries(profiles.map((p) => [p.name, p]));
-    const typeOf = (n) => (byName[n] ? byName[n].type : 'text');
-
-    const numCols = profiles.filter((p) => A.isNumericType(p.type) && !p.constant && p.values && p.values.length > 4).map((p) => p.name);
-    const catCols = profiles.filter((p) => A.isGroupable(p.type) && !p.constant && p.unique <= 60).map((p) => p.name);
-    const dateCols = profiles.filter((p) => p.type === 'date' && p.dates && p.dates.length > 3).map((p) => p.name);
-
-    // bucket high-cardinality numerics into quintiles so they can act as drivers too
-    const derivedCats = [];
-    numCols.forEach((c) => {
-      if (catCols.length >= 25) return;
-      const b = A.binNumeric(rows, c, 5);
-      if (!b) return;
-      const name = `${c} (quintile)`;
-      rows.forEach((r) => { const v = A.parseNumberLike(r[c]); r[name] = isFinite(v) ? b.label(v) : ''; });
-      derivedCats.push(name);
-    });
-
-    const primaryMetric = I.pickPrimaryMetric(profiles);
-    const allCats = [...catCols, ...derivedCats];
-
-    const correlations = A.numericCorrelations(rows, numCols, 0.15);
-    const correlationsAll = A.numericCorrelations(rows, numCols, 0);
-    // always test the headline metric first, then the other numerics
-    const metricsForDrivers = [...new Set([primaryMetric, ...numCols].filter(Boolean))].slice(0, 14);
-    const driverAll = A.driverAnalysis(rows, allCats, metricsForDrivers);
-    const driverResults = driverAll.filter((d) => d.eta2 > 0.005);
-    const catAssoc = A.categoricalAssociations(rows, catCols, 0.12);
-    const catAssocAll = A.categoricalAssociations(rows, catCols, 0);
-    const anomalies = A.detectAnomalies(rows, profiles);
-    const quality = A.qualityReport(profiles, rows);
-    // a metric's own quintile band trivially "predicts" it — exclude from the scan
-    const segCats = allCats.filter((c) => c !== `${primaryMetric} (quintile)`);
-    const segments = primaryMetric ? A.segmentScan(rows, segCats, primaryMetric) : [];
-    const paretoResults = [];
-    if (primaryMetric) {
-      catCols.slice(0, 6).forEach((c) => {
-        const pr = A.pareto(rows, c, primaryMetric);
-        if (pr.items.length >= 3) paretoResults.push({ ...pr, column: c, metric: primaryMetric });
-      });
-      paretoResults.sort((a, b) => a.pct80 - b.pct80);
-    }
-
-    let series = null, forecastResult = null, seasonal = null, dateCol = null, partialTrimmed = false;
-    if (dateCols.length && primaryMetric) {
-      dateCol = dateCols[0];
-      series = A.buildTimeSeries(rows, dateCol, primaryMetric, 'sum');
-      // A trailing partial period (far fewer records than typical) drags the last
-      // point toward zero and distorts both the chart and the projection baseline.
-      if (series.length > 8) {
-        const counts = series.map((p) => p.n);
-        const typical = A.median(counts);
-        while (series.length > 8 && series[series.length - 1].n < typical * 0.5) {
-          series = series.slice(0, -1);
-          partialTrimmed = true;
-        }
-      }
-      if (series.length > 5) {
-        const spanDays = (series[series.length - 1].t - series[0].t) / 86400000;
-        forecastResult = A.forecast(series, Math.max(14, Math.round(spanDays * 0.25)));
-        seasonal = A.seasonality(series);
-      } else series = null;
-    }
-
-    const ctx = {
-      rows, columns, profiles, byName, typeOf, numCols, catCols: allCats, baseCats: catCols, dateCols, derivedCats,
-      primaryMetric, correlations, correlationsAll, driverResults, driverAll,
-      catAssoc, catAssocAll, anomalies, quality, segments,
-      noise: A.noiseFloor(rows.length),
-      paretoResults, series, forecastResult, seasonal, dateCol, partialTrimmed,
-      domain: I.detectDomain(columns),
-    };
-    ctx.findings = I.buildFindings(ctx);
-    ctx.summary = I.buildSummary(ctx);
-    ctx.actions = I.buildActions(ctx);
-    ctx.elapsed = Math.round(performance.now() - t0);
-    return ctx;
+  function hydrateAnalysis(result) {
+    result.typeOf = (name) => (result.byName && result.byName[name] ? result.byName[name].type : 'text');
+    return result;
   }
+
+  const analyse = (ds, types) => Pipeline.analyse(ds, types);
 
   /* ================= dashboard ================= */
   function renderDashboard() {
@@ -282,56 +335,81 @@
     const root = el('dashboard');
     root.style.display = 'block';
     root.innerHTML = `
-      <div class="filebar"><span class="pill">📄 ${esc(ds.name)}</span>
-        <span class="pill">${ds.rows.length.toLocaleString()} rows × ${ds.columns.length} cols</span>
-        ${a.domain ? `<span class="pill accent">${esc(a.domain.label)} detected</span>` : ''}
-        <span class="pill">${a.findings.length} findings</span>
-        <span class="pill">analysed in ${a.elapsed}ms</span>
-        ${STATE.attestation ? `<span class="pill warnpill" title="Attested ${esc(STATE.attestation.at)}">\u26a0 No-PHI attestation on file</span>` : ''}</div>
+      <div class="workspace-layout">
+        <aside class="workspace-rail" aria-label="Dataset and report navigation">
+          <section class="dataset-card">
+            <div class="dataset-card-head">
+              <span class="dataset-file-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M6 3.75h8l4 4v12.5H6a2 2 0 0 1-2-2v-12a2.5 2.5 0 0 1 2-2.5Z"/><path d="M14 4v4h4M8 12h8M8 15.5h8"/></svg>
+              </span>
+              <div class="dataset-copy">
+                <span class="rail-kicker">CURRENT DATASET</span>
+                <strong title="${esc(ds.name)}">${esc(ds.name)}</strong>
+                <span>${ds.rows.length.toLocaleString()} rows · ${ds.columns.length} columns</span>
+              </div>
+            </div>
+            <div class="dataset-status"><span class="local-status"><i aria-hidden="true"></i>LOCAL SESSION</span><span>${a.findings.length} findings</span></div>
+            ${a.domain ? `<span class="domain-chip">${esc(a.domain.label)} detected</span>` : ''}
+            ${STATE.attestation ? `<span class="attest-chip" title="Attested ${esc(STATE.attestation.at)}">No-PHI attestation on file</span>` : ''}
+            <button class="btn rail-upload" id="replaceFileBtn" type="button"><span aria-hidden="true">＋</span>Open another file</button>
+          </section>
+          ${renderNav()}
+          <section class="rail-privacy" aria-label="Privacy status">
+            <span class="rail-lock" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M6 10h12v10H6zM8.5 10V7.5a3.5 3.5 0 0 1 7 0V10"/><path d="M12 14v2"/></svg></span>
+            <div><strong>Private by default</strong><span>Files stay in this browser session.</span></div>
+          </section>
+        </aside>
 
-      <section class="card summary">
-        <div class="sechead"><span class="sicon">📋</span><h2>Executive summary</h2></div>
-        <p class="lead">${a.summary}</p>
-      </section>
-
-      ${renderKpiStrip(a)}
-      ${renderNav()}
-      <div id="tab-findings" class="tabpane active">${renderFindings(a)}${renderActions(a)}</div>
-      <div id="tab-drivers" class="tabpane">${renderDrivers(a)}</div>
-      <div id="tab-relations" class="tabpane">${renderRelations(a)}</div>
-      <div id="tab-segments" class="tabpane">${renderSegments(a)}</div>
-      <div id="tab-columns" class="tabpane">${renderColumns(a)}</div>
-      <div id="tab-time" class="tabpane">${renderTime(a)}</div>
-      <div id="tab-quality" class="tabpane">${renderQuality(a)}</div>
-      <div id="tab-explore" class="tabpane">${renderExplore(a)}</div>
-      <div id="tab-data" class="tabpane">${renderDataTab(a)}</div>
+        <section class="workspace-main" aria-label="Analysis workspace">
+          <header class="workspace-pagehead">
+            <div class="workspace-title">
+              <div class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span> ANALYSIS WORKSPACE</div>
+              <h1>Analysis overview</h1>
+              <p>Explore patterns in <strong>${esc(ds.name)}</strong> and decide what to investigate next.</p>
+            </div>
+            <div class="workspace-meta" aria-label="Analysis status">
+              <span class="meta-chip complete"><i aria-hidden="true"></i>Analysis complete</span>
+              <span class="meta-chip">${a.elapsed} ms</span>
+            </div>
+          </header>
+          <div id="tab-overview" class="tabpane active">${renderOverview(a)}</div>
+          <div id="tab-findings" class="tabpane">${renderFindings(a)}${renderActions(a)}</div>
+          <div id="tab-drivers" class="tabpane">${renderDrivers(a)}</div>
+          <div id="tab-relations" class="tabpane">${renderRelations(a)}</div>
+          <div id="tab-segments" class="tabpane">${renderSegments(a)}</div>
+          <div id="tab-columns" class="tabpane">${renderColumns(a)}</div>
+          <div id="tab-time" class="tabpane">${renderTime(a)}</div>
+          <div id="tab-quality" class="tabpane">${renderQuality(a)}</div>
+          <div id="tab-explore" class="tabpane">${renderExplore(a)}</div>
+          <div id="tab-data" class="tabpane">${renderDataTab(a)}</div>
+        </section>
+      </div>
     `;
     wireDashboard(a);
     window.scrollTo(0, 0);
-    if (global.PrismaAnim) {
-      global.PrismaAnim.enterDashboard(root);
-      // wait a frame so the freshly-injected pane has real dimensions
-      requestAnimationFrame(() => global.PrismaAnim.observe(el('tab-findings')));
+    if (global.TabulaMetricsAnim) {
+      global.TabulaMetricsAnim.enterDashboard(root);
+      requestAnimationFrame(() => global.TabulaMetricsAnim.observe(el('tab-overview')));
       animateKpis();
     }
   }
 
   const TABS = [
-    ['findings', '💡 Findings'], ['drivers', '🎯 Drivers'], ['relations', '🔗 Relationships'],
-    ['segments', '🧭 Segments'], ['columns', '📚 Column Profiles'], ['time', '📈 Trends'],
-    ['quality', '🧪 Data Quality'], ['explore', '🔬 Explore'], ['data', '🗂 Data'],
+    ['overview', 'Overview', '◫'], ['findings', 'Findings', '✦'], ['drivers', 'Drivers', '↗'],
+    ['relations', 'Relationships', '⇄'], ['segments', 'Segments', '▤'], ['columns', 'Column profiles', '▥'],
+    ['time', 'Trends', '⌁'], ['quality', 'Data quality', '◉'], ['explore', 'Explore', '⌘'], ['data', 'Data preview', '▦'],
   ];
   function renderNav() {
-    return `<nav class="tabs">${TABS.map(([id, label], i) => `<button class="tab${i === 0 ? ' active' : ''}" data-tab="${id}">${label}</button>`).join('')}</nav>`;
+    return `<nav class="workspace-nav tabs" aria-label="Report sections"><div class="rail-kicker nav-kicker">EXPLORE REPORT</div>${TABS.map(([id, label, icon], i) => `<button class="tab${i === 0 ? ' active' : ''}" type="button" data-tab="${id}" aria-controls="tab-${id}" aria-current="${i === 0 ? 'page' : 'false'}"><span class="tab-icon" aria-hidden="true">${icon}</span><span class="tab-label">${label}</span></button>`).join('')}</nav>`;
   }
 
-  // Put the tab strip just under the sticky header so the active pane's own
-  // content is the first thing visible.
+  // Keep a newly selected report view at the top of the main workspace while
+  // the dataset rail remains available as a persistent navigation anchor.
   function scrollToTabs() {
-    const tabs = $('.tabs'), bar = $('.appbar');
-    if (!tabs) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+    const main = $('.workspace-main'), bar = $('.appbar');
+    if (!main) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
     const barH = bar ? bar.getBoundingClientRect().height : 0;
-    const y = window.scrollY + tabs.getBoundingClientRect().top - barH;
+    const y = window.scrollY + main.getBoundingClientRect().top - barH - 10;
     window.scrollTo({ top: Math.max(0, Math.round(y)), behavior: 'smooth' });
   }
 
@@ -341,7 +419,7 @@
     cards.push({ label: 'Data quality', value: a.quality.score + '/100', sub: `${a.quality.issues.length} issue${a.quality.issues.length === 1 ? '' : 's'}`, tone: a.quality.score >= 90 ? 'pos' : a.quality.score >= 70 ? 'warn' : 'neg' });
     const kpiDriver = a.driverResults.find((d) => d.metric === a.primaryMetric) || a.driverResults[0];
     if (kpiDriver) {
-      cards.push({ label: 'Top driver', value: trunc(kpiDriver.driver, 22), sub: `explains ${(kpiDriver.eta2 * 100).toFixed(0)}% of ${trunc(kpiDriver.metric, 16)}`, tone: 'accent' });
+      cards.push({ label: 'Top adjusted association', value: trunc(kpiDriver.driver, 22), sub: `ω² ${(kpiDriver.omega2 || 0).toFixed(2)} · ${trunc(kpiDriver.metric, 16)}`, tone: 'accent' });
     }
     if (a.correlations.length) {
       const c = a.correlations[0];
@@ -372,6 +450,70 @@
     return `<div class="kpis">${cards.map((c) => `<div class="kpi ${c.tone || ''}"><div class="klabel">${esc(c.label)}</div><div class="kvalue">${esc(String(c.value))}</div><div class="ksub">${esc(c.sub || '')}</div></div>`).join('')}</div>`;
   }
 
+  /* ---------- overview workspace ---------- */
+  function renderOverview(a) {
+    const topFindings = a.findings.slice(0, 3);
+    const cols = a.columns.slice(0, 6);
+    const previewRows = a.rows.slice(0, 5);
+    const preview = `<section class="card overview-preview">
+      <div class="overview-card-head"><div><span class="rail-kicker">FIRST LOOK</span><h2>Data preview</h2><p>Sample rows from the file, kept in this browser session.</p></div>
+        <button class="text-action overview-link" type="button" data-tab-link="data">View full dataset <span aria-hidden="true">→</span></button></div>
+      <div class="tablewrap preview"><table class="datatable"><thead><tr>${cols.map((c) => `<th>${esc(c)}<span class="thtype">${esc(a.typeOf(c))}</span></th>`).join('')}</tr></thead>
+        <tbody>${previewRows.map((r) => `<tr>${cols.map((c) => `<td>${esc(trunc(String(r[c] ?? ''), 32))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
+      ${a.columns.length > cols.length ? `<p class="dim small preview-note">Showing ${cols.length} of ${a.columns.length} columns and ${previewRows.length} sample rows.</p>` : ''}
+    </section>`;
+    const insights = topFindings.length ? topFindings.map((f, i) => `<article class="overview-insight ${f.tone}">
+      <div class="insight-overline"><span class="insight-index">0${i + 1}</span><span class="ftag">${esc(f.kind)}</span></div>
+      <h3>${esc(f.title)}</h3><p>${f.body}</p>
+    </article>`).join('') : '<p class="empty">No notable patterns surfaced yet. Review the profile and data-quality sections for context.</p>';
+    return `<div class="overview-stack">
+      <section class="card summary overview-summary">
+        <div class="overview-card-head summary-head"><div><span class="rail-kicker">A QUICK READ</span><h2>Executive summary</h2></div>
+          <span class="summary-context"><i aria-hidden="true"></i>${a.rows.length.toLocaleString()} rows assessed</span></div>
+        <p class="lead">${a.summary}</p>
+      </section>
+      <section class="overview-kpi-section" aria-labelledby="overviewKpisTitle">
+        <div class="overview-section-head"><div><span class="rail-kicker">AT A GLANCE</span><h2 id="overviewKpisTitle">Key indicators</h2></div><span class="dim small">Computed locally from this dataset</span></div>
+        ${renderKpiStrip(a)}
+      </section>
+      <div class="overview-grid">
+        <div class="overview-main-column">${renderOverviewChart(a)}${preview}</div>
+        <aside class="overview-side-column" aria-label="Highlights and recommended actions">
+          <section class="card overview-insights-card"><div class="overview-card-head"><div><span class="rail-kicker">SIGNALS TO EXPLORE</span><h2>Key findings</h2></div><button class="text-action overview-link" type="button" data-tab-link="findings">All findings <span aria-hidden="true">→</span></button></div>
+            <div class="overview-insights">${insights}</div>
+          </section>
+          ${renderActions(a, 'overview-actions')}
+          <section class="rail-privacy overview-privacy"><span class="rail-lock" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M6 10h12v10H6zM8.5 10V7.5a3.5 3.5 0 0 1 7 0V10"/><path d="M12 14v2"/></svg></span><div><strong>Local, by design</strong><span>No dataset contents are uploaded or retained by the app.</span></div></section>
+        </aside>
+      </div>
+    </div>`;
+  }
+
+  function renderOverviewChart(a) {
+    let title = 'A closer look', note = 'A visual summary of the strongest available signal.', chart = '';
+    const driver = a.driverResults.find((d) => d.metric === a.primaryMetric) || a.driverResults[0];
+    if (driver) {
+      const isCur = a.typeOf(driver.metric) === 'currency';
+      title = `${driver.driver} and ${driver.metric}`;
+      note = `Top adjusted association · ω² ${(driver.omega2 || 0).toFixed(2)} · BH ${fmtQ(driver.pAdj)} · observational, not causal`;
+      chart = C.barH(driver.levels.slice(0, 8).map((l) => ({ label: l.key, value: l.mean, sub: `n=${l.n}`, color: l.lift >= 0 ? 'var(--c1)' : 'var(--c4)' })), { currency: isCur });
+    } else if (a.correlations.length) {
+      const c = a.correlations[0], pair = pairFor(a.rows, c.a, c.b);
+      title = `${c.a} and ${c.b}`;
+      note = `Strongest adjusted numeric relationship · r ${c.r >= 0 ? '+' : ''}${c.r.toFixed(2)} · BH ${fmtQ(c.pAdj)} · correlation is not causation`;
+      chart = C.scatter(pair[0], pair[1], { width: 720, height: 280, xLabel: c.a, yLabel: c.b, xCurrency: a.typeOf(c.a) === 'currency', yCurrency: a.typeOf(c.b) === 'currency' });
+    } else if (a.series && a.series.length) {
+      const isCur = a.typeOf(a.primaryMetric) === 'currency';
+      title = `${a.primaryMetric} over time`;
+      note = `Time-series view · ${a.series.length} periods · projection is descriptive, not a guarantee`;
+      chart = C.timeSeries(a.series, A.movingAverage(a.series, 7), a.forecastResult, { currency: isCur, width: 720, height: 280 });
+    } else {
+      note = 'No adjusted association or time series was available for a primary chart. The other report sections explain what could be tested.';
+      chart = `<p class="empty overview-chart-empty">${esc(note)}</p>`;
+    }
+    return `<section class="card overview-chart-card"><div class="overview-card-head"><div><span class="rail-kicker">SIGNAL SNAPSHOT</span><h2>${esc(title)}</h2><p>${esc(note)}</p></div><button class="chart-link overview-link" type="button" data-tab-link="${driver ? 'drivers' : a.correlations.length ? 'relations' : 'time'}">Explore details <span aria-hidden="true">→</span></button></div><div class="overview-chart-scroll">${chart}</div></section>`;
+  }
+
   /* ---------- findings ---------- */
   function renderFindings(a) {
     if (!a.findings.length) return '<section class="card"><p class="dim">No findings generated.</p></section>';
@@ -385,8 +527,8 @@
       <div class="findings">${cards}</div></section>`;
   }
 
-  function renderActions(a) {
-    return `<section class="card"><div class="sechead"><span class="sicon">🚀</span><h2>Recommended next steps</h2></div>
+  function renderActions(a, extraClass = '') {
+    return `<section class="card ${extraClass}"><div class="sechead"><span class="sicon">🚀</span><h2>Recommended next steps</h2></div>
       <ul class="actions">${a.actions.map((x) => `<li><span>${x.icon}</span><div>${x.text}</div></li>`).join('')}</ul></section>`;
   }
 
@@ -401,15 +543,15 @@
           <p class="empty">Driver analysis needs at least one numeric metric and one categorical column with 2+ groups of 3+ rows each. This file has <b>${a.numCols.length} numeric</b> and <b>${a.baseCats.length} categorical</b> usable columns — check the column types in the preview step.</p></section>`;
       }
       const top = a.driverAll.slice(0, 12);
-      const floor = a.noise ? a.noise.eta2 : 0.0005;
+      const floor = top[0] ? top[0].noiseEta2 : (a.noise ? a.noise.eta2 : 0.0005);
       return `<section class="card">
-        <div class="sechead"><span class="sicon">🎯</span><h2>No drivers found</h2><span class="dim small">${tested.toLocaleString()} combinations tested</span></div>
-        <p class="explain"><b>The analysis ran successfully — it just found nothing.</b> Every one of the ${tested.toLocaleString()} driver/metric combinations was tested with one-way ANOVA, and none explained more than <b>${(top[0].eta2 * 100).toFixed(2)}%</b> of its metric's variation. With ${a.rows.length.toLocaleString()} rows, random noise alone produces η² around ${(floor * 100).toFixed(2)}%, so these results are indistinguishable from chance.</p>
-        <p class="explain">This is the expected result when the values in each column are independent of one another — most commonly with <b>randomly generated or synthetic data</b>, where no real relationships were built in. On real-world data you would normally see at least a few η² values above 0.06.</p>
-        <h4 class="mt">Strongest combinations tested (all below the significance bar)</h4>
-        <div class="tablewrap"><table><thead><tr><th>Driver</th><th>Metric</th><th class="num">η² explained</th><th class="num">F</th><th class="num">Significance</th><th>Highest group</th><th>Lowest group</th></tr></thead><tbody>
+        <div class="sechead"><span class="sicon">🎯</span><h2>No adjusted-significant drivers</h2><span class="dim small">${tested.toLocaleString()} combinations tested</span></div>
+        <p class="explain"><b>No eligible driver/metric combination passed Benjamini–Hochberg false-discovery-rate adjustment at q &lt; 0.05.</b> The largest sample η² was <b>${(top[0].eta2 * 100).toFixed(2)}%</b> across ${top[0].levels.length} groups; the rough null expectation for that split is about ${(floor * 100).toFixed(2)}%. Ranked rows below are exploratory, not confirmed drivers.</p>
+        <p class="explain">A lack of significant results does not prove the fields are independent. Small samples, missingness, sparse categories, nonlinear effects, or other assumptions can hide real patterns. The reported differences are descriptive and do not imply causation.</p>
+        <h4 class="mt">Largest sample effects tested</h4>
+        <div class="tablewrap"><table><thead><tr><th>Grouping</th><th>Metric</th><th class="num">η²</th><th class="num">ω²</th><th class="num">F</th><th class="num">BH q</th><th>Highest group</th><th>Lowest group</th></tr></thead><tbody>
         ${top.map((d) => `<tr><td><b>${esc(d.driver)}</b></td><td>${esc(d.metric)}</td>
-          <td class="num">${(d.eta2 * 100).toFixed(3)}%</td><td class="num">${isFinite(d.f) ? d.f.toFixed(2) : '—'}</td><td class="num">${fmtP(d.p)}</td>
+          <td class="num">${(d.eta2 * 100).toFixed(3)}%</td><td class="num">${((d.omega2 || 0) * 100).toFixed(3)}%</td><td class="num">${isFinite(d.f) ? d.f.toFixed(2) : '∞'}</td><td class="num">${fmtQ(d.pAdj)}</td>
           <td>${esc(trunc(d.top.key, 18))} <span class="dim">${fmtNum(d.top.mean, { currency: a.typeOf(d.metric) === 'currency' })}</span></td>
           <td>${esc(trunc(d.bottom.key, 18))} <span class="dim">${fmtNum(d.bottom.mean, { currency: a.typeOf(d.metric) === 'currency' })}</span></td></tr>`).join('')}
         </tbody></table></div></section>`;
@@ -420,8 +562,8 @@
     const top = ordered.slice(0, 14);
     const rows = top.map((d) => `<tr>
         <td><b>${esc(d.driver)}</b></td><td>${esc(d.metric)}</td>
-        <td class="num etacell"><span class="bar" style="--w:${Math.min(100, d.eta2 * 100 * 2).toFixed(0)}%"></span><span class="etaval">${(d.eta2 * 100).toFixed(1)}%</span></td>
-        <td class="num">${isFinite(d.f) ? d.f.toFixed(1) : '—'}</td><td class="num">${fmtP(d.p)}</td>
+        <td class="num etacell"><span class="bar" style="--w:${Math.min(100, (d.omega2 || 0) * 100 * 2).toFixed(0)}%"></span><span class="etaval">${(d.eta2 * 100).toFixed(1)}% / ${((d.omega2 || 0) * 100).toFixed(1)}%</span></td>
+        <td class="num">${d.f === Infinity ? '∞' : isFinite(d.f) ? d.f.toFixed(1) : '—'}</td><td class="num">${fmtQ(d.pAdj)}</td>
         <td>${esc(trunc(d.top.key, 18))} <span class="dim">${fmtNum(d.top.mean, { currency: a.typeOf(d.metric) === 'currency' })}</span></td>
         <td>${esc(trunc(d.bottom.key, 18))} <span class="dim">${fmtNum(d.bottom.mean, { currency: a.typeOf(d.metric) === 'currency' })}</span></td>
         <td class="num">${fmtNum(d.spread, { currency: a.typeOf(d.metric) === 'currency' })}</td>
@@ -432,7 +574,7 @@
       const items = d.levels.slice(0, 12).map((l) => ({ label: l.key, value: l.mean, sub: `n=${l.n}`, color: l.lift >= 0 ? 'var(--c1)' : 'var(--c4)' }));
       return `<div class="subcard">
         <h4>${esc(d.driver)} → ${esc(d.metric)}</h4>
-        <p class="dim small">η² = ${d.eta2.toFixed(3)} · F = ${isFinite(d.f) ? d.f.toFixed(1) : '—'} · ${fmtP(d.p)} · ${d.levels.length} groups · n = ${d.n}</p>
+        <p class="dim small">η² = ${d.eta2.toFixed(3)} · bias-adjusted ω² = ${(d.omega2 || 0).toFixed(3)} · F = ${d.f === Infinity ? '∞' : isFinite(d.f) ? d.f.toFixed(1) : '—'} · BH ${fmtQ(d.pAdj)} · ${d.levels.length} groups · n = ${d.n}</p>
         ${C.barH(items, { currency: isCur })}
         <table class="mini"><thead><tr><th>Group</th><th class="num">n</th><th class="num">Mean</th><th class="num">Median</th><th class="num">vs avg</th></tr></thead>
         <tbody>${d.levels.slice(0, 12).map((l) => `<tr><td>${esc(trunc(l.key, 26))}</td><td class="num">${l.n}</td><td class="num">${fmtNum(l.mean, { currency: isCur })}</td><td class="num">${fmtNum(l.median, { currency: isCur })}</td><td class="num ${l.lift >= 0 ? 'pos' : 'neg'}">${l.lift >= 0 ? '+' : ''}${l.lift.toFixed(1)}%</td></tr>`).join('')}</tbody></table>
@@ -440,38 +582,38 @@
     }).join('');
 
     return `<section class="card">
-      <div class="sechead"><span class="sicon">🎯</span><h2>What actually drives your metrics</h2><span class="dim small">one-way ANOVA · η² effect size</span></div>
-      <p class="explain">Each row measures how much of a metric's variation is explained by splitting the data on a categorical field. <b>η² (eta-squared)</b> runs 0–1: above 0.14 is a large effect, 0.06–0.14 medium, below 0.06 small. Numeric fields are also bucketed into quintiles so they can be tested as drivers.</p>
-      <div class="tablewrap"><table><thead><tr><th>Driver</th><th>Metric</th><th class="num">η² explained</th><th class="num">F</th><th class="num">Significance</th><th>Highest group</th><th>Lowest group</th><th class="num">Spread</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="sechead"><span class="sicon">🎯</span><h2>Adjusted associations with metrics</h2><span class="dim small">one-way ANOVA · BH-adjusted q · observational</span></div>
+      <p class="explain">η² is the sample share of variance across groups; ω² is a bias-adjusted effect-size estimate. Results shown here passed Benjamini–Hochberg false-discovery-rate adjustment at q &lt; 0.05. These are observational associations—not causal drivers—and effect sizes can still be uncertain for small or sparse groups. Numeric fields are also bucketed into quintiles.</p>
+      <div class="tablewrap"><table><thead><tr><th>Grouping</th><th>Metric</th><th class="num">η² / ω²</th><th class="num">F</th><th class="num">BH q</th><th>Highest group</th><th>Lowest group</th><th class="num">Spread</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="grid2">${detail}</div>
     </section>`;
   }
 
   /* ---------- relationships ---------- */
   function renderRelations(a) {
-    let html = '<section class="card"><div class="sechead"><span class="sicon">🔗</span><h2>Numeric relationships</h2><span class="dim small">Pearson r, Spearman ρ, significance</span></div>';
+    let html = '<section class="card"><div class="sechead"><span class="sicon">🔗</span><h2>Numeric relationships</h2><span class="dim small">Pearson r, Spearman ρ · BH-adjusted q</span></div>';
     if (!a.correlations.length) {
       const all = a.correlationsAll || [];
-      const floor = a.noise ? a.noise.r : 0.03;
       if (!all.length) {
         html += `<p class="empty">Only ${a.numCols.length} usable numeric column${a.numCols.length === 1 ? '' : 's'} were found, so there are no pairs to correlate. Check the column types in the preview step.</p>`;
       } else {
-        html += `<p class="explain"><b>All ${all.length.toLocaleString()} numeric pairs were tested — none showed a meaningful relationship.</b> The strongest was |r| = ${Math.abs(all[0].r).toFixed(3)}, against a chance threshold of ±${floor.toFixed(3)} for ${a.rows.length.toLocaleString()} rows. In other words, the largest correlation here is about what you would get from random numbers.</p>
-        <p class="explain">This is typical of <b>synthetic or randomly generated data</b>. Real datasets almost always contain some correlated measures (e.g. experience and salary, or size and cost).</p>
-        <h4 class="mt">Strongest pairs tested (all below the threshold)</h4>
-        <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">r</th><th class="num">r²</th><th class="num">Spearman ρ</th><th class="num">n</th><th class="num">Significance</th></tr></thead><tbody>
+        const strongestRef = A.noiseFloor(all[0].n).r;
+        html += `<p class="explain"><b>No numeric pair passed BH false-discovery-rate adjustment at q &lt; 0.05.</b> The largest observed |r| was ${Math.abs(all[0].r).toFixed(3)} (q = ${fmtQ(all[0].pAdj)}; approximate 95% null reference ±${strongestRef.toFixed(3)} for n = ${all[0].n}). This is not proof that the fields are independent.</p>
+        <p class="explain">The table shows the largest observed pairs for exploration. Correlation tests assume independent observations and a roughly appropriate Pearson/Spearman model; validate important findings on fresh data.</p>
+        <h4 class="mt">Largest observed pairs</h4>
+        <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">r</th><th class="num">r²</th><th class="num">Spearman ρ</th><th class="num">n</th><th class="num">BH q</th></tr></thead><tbody>
         ${all.slice(0, 12).map((c) => `<tr><td>${esc(c.a)}</td><td>${esc(c.b)}</td>
           <td class="num ${c.r >= 0 ? 'pos' : 'neg'}">${c.r.toFixed(4)}</td><td class="num">${(c.r * c.r * 100).toFixed(2)}%</td>
-          <td class="num">${isFinite(c.rho) ? c.rho.toFixed(4) : '—'}</td><td class="num">${c.n}</td><td class="num">${fmtP(c.p)}</td></tr>`).join('')}
+          <td class="num">${isFinite(c.rho) ? c.rho.toFixed(4) : '—'}</td><td class="num">${c.n}</td><td class="num">${fmtQ(c.pAdj)}</td></tr>`).join('')}
         </tbody></table></div>`;
       }
     } else {
-      html += `<p class="explain">r measures straight-line association from −1 to +1. r² is the share of variance shared. Where Spearman ρ clearly exceeds r, the relationship is monotonic but curved — a linear model would understate it.</p>
-      <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">r</th><th class="num">r²</th><th class="num">Spearman ρ</th><th class="num">n</th><th class="num">Significance</th><th>Reading</th></tr></thead><tbody>
+      html += `<p class="explain">r measures straight-line association from −1 to +1. r² is the sample variance shared; Spearman ρ captures rank-order association. Values shown passed BH adjustment across the tested numeric pairs, but correlation is not causation.</p>
+      <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">r</th><th class="num">r²</th><th class="num">Spearman ρ</th><th class="num">n</th><th class="num">BH q</th><th>Reading</th></tr></thead><tbody>
       ${a.correlations.slice(0, 25).map((c) => `<tr><td>${esc(c.a)}</td><td>${esc(c.b)}</td>
         <td class="num ${c.r >= 0 ? 'pos' : 'neg'}"><b>${c.r.toFixed(3)}</b></td><td class="num">${(c.r * c.r * 100).toFixed(0)}%</td>
-        <td class="num">${isFinite(c.rho) ? c.rho.toFixed(3) : '—'}</td><td class="num">${c.n}</td><td class="num">${fmtP(c.p)}</td>
-        <td>${esc(c.strength)}${c.nonlinear ? ' <span class="tagpill">non-linear</span>' : ''}${c.p >= 0.05 ? ' <span class="tagpill warn">not significant</span>' : ''}</td></tr>`).join('')}
+        <td class="num">${isFinite(c.rho) ? c.rho.toFixed(3) : '—'}</td><td class="num">${c.n}</td><td class="num">${fmtQ(c.pAdj)}</td>
+        <td>${esc(c.strength)}${c.nonlinear ? ' <span class="tagpill">monotonic / curved</span>' : ''}</td></tr>`).join('')}
       </tbody></table></div>`;
       if (a.numCols.length >= 3) {
         const cols = a.numCols.slice(0, 14);
@@ -490,7 +632,7 @@
       const top = a.correlations.slice(0, 4);
       html += `<h4 class="mt">Scatter plots — strongest pairs</h4><div class="grid2">${top.map((c) => {
         const [xs, ys] = pairFor(a.rows, c.a, c.b);
-        return `<div class="subcard"><h4>${esc(c.a)} vs ${esc(c.b)}</h4><p class="dim small">r = ${c.r.toFixed(3)} · ${fmtP(c.p)} · n = ${c.n}</p>
+        return `<div class="subcard"><h4>${esc(c.a)} vs ${esc(c.b)}</h4><p class="dim small">r = ${c.r.toFixed(3)} · BH ${fmtQ(c.pAdj)} · n = ${c.n}</p>
           ${C.scatter(xs, ys, { xLabel: c.a, yLabel: c.b, xCurrency: a.typeOf(c.a) === 'currency', yCurrency: a.typeOf(c.b) === 'currency' })}</div>`;
       }).join('')}</div>`;
     }
@@ -502,16 +644,16 @@
       if (!all.length) {
         html += `<p class="empty">Fewer than two usable categorical columns were found, so there are no pairs to test.</p>`;
       } else {
-        html += `<p class="explain"><b>All ${all.length.toLocaleString()} categorical pairs were tested — none showed meaningful association.</b> The strongest was Cramér's V = ${all[0].v.toFixed(3)} (${esc(all[0].a)} ↔ ${esc(all[0].b)}), where 0 means completely independent. Values this low mean knowing one field tells you essentially nothing about the other.</p>
-        <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">Cramér's V</th><th class="num">χ²</th><th class="num">Significance</th><th class="num">Levels</th></tr></thead><tbody>
-        ${all.slice(0, 10).map((c) => `<tr><td>${esc(c.a)}</td><td>${esc(c.b)}</td><td class="num">${c.v.toFixed(4)}</td><td class="num">${c.chi2.toFixed(1)}</td><td class="num">${fmtP(c.p)}</td><td class="num">${c.la}×${c.lb}</td></tr>`).join('')}
+        html += `<p class="explain"><b>No categorical pair passed BH false-discovery-rate adjustment at q &lt; 0.05.</b> The largest observed Cramér's V was ${all[0].v.toFixed(3)} (${esc(all[0].a)} ↔ ${esc(all[0].b)}; q = ${fmtQ(all[0].pAdj)}). Cramér's V is descriptive; a dash for q means the chi-square approximation was withheld because expected cell counts were too sparse.</p>
+        <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">Cramér's V</th><th class="num">χ²</th><th class="num">BH q</th><th>Test status</th><th class="num">Levels</th></tr></thead><tbody>
+        ${all.slice(0, 10).map((c) => `<tr><td>${esc(c.a)}</td><td>${esc(c.b)}</td><td class="num">${c.v.toFixed(4)}</td><td class="num">${c.chi2.toFixed(1)}</td><td class="num">${fmtQ(c.pAdj)}</td><td>${c.chiSquareReliable ? 'asymptotic χ²' : 'sparse counts; descriptive only'}</td><td class="num">${c.la}×${c.lb}</td></tr>`).join('')}
         </tbody></table></div>`;
       }
     }
-    else html += `<p class="explain">Cramér's V measures how strongly two categorical fields move together, from 0 (independent) to 1 (one perfectly predicts the other). Values above 0.7 often signal redundant or derived columns.</p>
-      <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">Cramér's V</th><th class="num">χ²</th><th class="num">Significance</th><th class="num">Levels</th><th>Reading</th></tr></thead><tbody>
-      ${a.catAssoc.slice(0, 20).map((c) => `<tr><td>${esc(c.a)}</td><td>${esc(c.b)}</td><td class="num"><b>${c.v.toFixed(3)}</b></td><td class="num">${c.chi2.toFixed(1)}</td><td class="num">${fmtP(c.p)}</td><td class="num">${c.la}×${c.lb}</td>
-      <td>${c.v >= 0.7 ? 'near-duplicate fields' : c.v >= 0.4 ? 'strong overlap' : c.v >= 0.25 ? 'moderate overlap' : 'mild overlap'}</td></tr>`).join('')}</tbody></table></div>`;
+    else html += `<p class="explain">Cramér's V measures sample association from 0 to 1. Listed pairs passed BH false-discovery-rate adjustment and met the expected-count rule for the chi-square approximation. A strong association does not establish that one field causes the other.</p>
+      <div class="tablewrap"><table><thead><tr><th>Field A</th><th>Field B</th><th class="num">Cramér's V</th><th class="num">χ²</th><th class="num">BH q</th><th class="num">Levels</th><th>Reading</th></tr></thead><tbody>
+      ${a.catAssoc.slice(0, 20).map((c) => `<tr><td>${esc(c.a)}</td><td>${esc(c.b)}</td><td class="num"><b>${c.v.toFixed(3)}</b></td><td class="num">${c.chi2.toFixed(1)}</td><td class="num">${fmtQ(c.pAdj)}</td><td class="num">${c.la}×${c.lb}</td>
+      <td>${c.v >= 0.7 ? 'strong overlap; review definitions' : c.v >= 0.4 ? 'strong overlap' : c.v >= 0.25 ? 'moderate overlap' : 'mild overlap'}</td></tr>`).join('')}</tbody></table></div>`;
     html += '</section>';
     return html;
   }
@@ -531,11 +673,11 @@
     const cold = a.segments.filter((s) => s.lift < 0).slice(0, 12);
     const tbl = (list, title, tone) => `<div class="subcard"><h4>${title}</h4>
       ${C.barH(list.map((s) => ({ label: `${trunc(s.column, 12)}: ${trunc(s.value, 14)}`, value: s.lift, sub: `n=${s.n}`, color: tone })), {})}
-      <table class="mini"><thead><tr><th>Field</th><th>Value</th><th class="num">n</th><th class="num">Mean</th><th class="num">vs avg</th><th class="num">z</th></tr></thead><tbody>
-      ${list.map((s) => `<tr><td>${esc(trunc(s.column, 18))}</td><td>${esc(trunc(s.value, 20))}</td><td class="num">${s.n}</td><td class="num">${fmtNum(s.mean, { currency: isCur })}</td><td class="num ${s.lift >= 0 ? 'pos' : 'neg'}">${s.lift >= 0 ? '+' : ''}${s.lift.toFixed(1)}%</td><td class="num">${s.z.toFixed(1)}</td></tr>`).join('')}
+      <table class="mini"><thead><tr><th>Field</th><th>Value</th><th class="num">n</th><th class="num">Mean</th><th class="num">vs avg</th><th class="num">Welch t</th><th class="num">BH q</th></tr></thead><tbody>
+      ${list.map((s) => `<tr><td>${esc(trunc(s.column, 18))}</td><td>${esc(trunc(s.value, 20))}</td><td class="num">${s.n}</td><td class="num">${fmtNum(s.mean, { currency: isCur })}</td><td class="num ${s.lift >= 0 ? 'pos' : 'neg'}">${s.lift >= 0 ? '+' : ''}${s.lift.toFixed(1)}%</td><td class="num">${s.t === Infinity ? '∞' : s.t === -Infinity ? '−∞' : s.t.toFixed(1)}</td><td class="num">${fmtQ(s.pAdj)}</td></tr>`).join('')}
       </tbody></table></div>`;
-    let html = `<section class="card"><div class="sechead"><span class="sicon">🧭</span><h2>Segment scan — ${esc(a.primaryMetric)}</h2><span class="dim small">every category value ranked by deviation</span></div>
-      <p class="explain">Each value of every categorical field is compared against the dataset average for <b>${esc(a.primaryMetric)}</b>. The z-score accounts for segment size, so a small segment needs a bigger gap to rank highly. |z| ≥ 2 is unlikely to be noise.</p>
+    let html = `<section class="card"><div class="sechead"><span class="sicon">🧭</span><h2>Segment scan — ${esc(a.primaryMetric)}</h2><span class="dim small">segments compared with remaining rows</span></div>
+      <p class="explain">Each category value is compared with the remaining usable rows using Welch's t-test; p-values are BH-adjusted over the full segment scan. Lift is descriptive, and even adjusted associations are not causal.</p>
       <div class="grid2">${tbl(hot, '📈 Over-performing segments', 'var(--pos)')}${tbl(cold, '📉 Under-performing segments', 'var(--neg)')}</div></section>`;
 
     // composition donuts — share of the metric held by each category value
@@ -630,13 +772,13 @@
       ${a.partialTrimmed ? '<p class="explain">A trailing partial period was excluded from the trend — it held far fewer records than a typical period and would have dragged the line down artificially.</p>' : ''}
       <p class="explain">Least-squares regression on ${a.series.length} periods. Slope ${fmtNum(f.slope, { currency: isCur })} per day, R² ${f.r2.toFixed(2)}${f.r2 < 0.3 ? ' — weak fit, so the band is wide and the projection should be treated as a rough reference' : ''}. The band widens with distance because prediction uncertainty compounds.</p></section>`;
 
-    if (a.seasonal) {
-      html += `<section class="card"><div class="sechead"><span class="sicon">🗓️</span><h2>Seasonality</h2></div>
-        <div class="grid2">
-          <div class="subcard"><h4>Day of week (index, 100 = average)</h4>${C.barH(a.seasonal.dow.filter((d) => d.n).map((d) => ({ label: d.label, value: d.index - 100, sub: `n=${d.n}`, color: d.index >= 100 ? 'var(--pos)' : 'var(--neg)' })), {})}</div>
-          <div class="subcard"><h4>Month (index, 100 = average)</h4>${C.barH(a.seasonal.month.filter((d) => d.n).map((d) => ({ label: d.label, value: d.index - 100, sub: `n=${d.n}`, color: d.index >= 100 ? 'var(--pos)' : 'var(--neg)' })), {})}</div>
-        </div>
-        <p class="explain">Bars show deviation from the overall daily average. Values above zero run hotter than typical.</p></section>`;
+    if (a.seasonal && (a.seasonal.dow.length || a.seasonal.month.length)) {
+      const cards = [];
+      if (a.seasonal.dow.length) cards.push(`<div class="subcard"><h4>Day of week (index, 100 = average)</h4>${C.barH(a.seasonal.dow.map((d) => ({ label: d.label, value: d.index - 100, sub: `n=${d.n}`, color: d.index >= 100 ? 'var(--pos)' : 'var(--neg)' })), {})}</div>`);
+      if (a.seasonal.month.length) cards.push(`<div class="subcard"><h4>Month (index, 100 = average)</h4>${C.barH(a.seasonal.month.map((d) => ({ label: d.label, value: d.index - 100, sub: `n=${d.n}`, color: d.index >= 100 ? 'var(--pos)' : 'var(--neg)' })), {})}</div>`);
+      html += `<section class="card"><div class="sechead"><span class="sicon">🗓️</span><h2>Seasonality — descriptive indices</h2></div>
+        <div class="grid2">${cards.join('')}</div>
+        <p class="explain">Bars show deviation from the overall average and are descriptive, not significance tests. Weekday summaries require at least eight observations per weekday across eight weeks; month-of-year summaries require at least two years of coverage.</p></section>`;
     }
     // Period breakdown — always shown, and the main content when the trend is
     // too weak to project from. Aggregates the metric by month.
@@ -773,10 +915,10 @@
       buckets.get(key).push(v);
     });
     if (buckets.size < 2) return '';
-    const periods = [...buckets.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([key, vals]) => ({
-      key, n: vals.length, sum: A.sum(vals), mean: A.mean(vals), median: A.median(vals),
-      min: Math.min(...vals), max: Math.max(...vals),
-    }));
+    const periods = [...buckets.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([key, vals]) => {
+      const range = A.minMax(vals);
+      return { key, n: vals.length, sum: A.sum(vals), mean: A.mean(vals), median: A.median(vals), min: range.min, max: range.max };
+    });
     periods.forEach((p, i) => {
       const prev = periods[i - 1];
       p.change = prev && prev.sum ? ((p.sum - prev.sum) / Math.abs(prev.sum)) * 100 : null;
@@ -872,7 +1014,7 @@
       ${show.map((g) => `<tr><td>${esc(trunc(g.key, 30))}</td><td class="num">${g.n}</td><td class="num">${fmtNum(g.mean, { currency: isCur })}</td><td class="num">${fmtNum(g.median, { currency: isCur })}</td><td class="num">${fmtNum(g.sd, { currency: isCur })}</td><td class="num">${fmtNum(g.min, { currency: isCur })}</td><td class="num">${fmtNum(g.max, { currency: isCur })}</td><td class="num">${fmtNum(g.sum, { currency: isCur })}</td>
         <td class="num ${g.mean >= overall ? 'pos' : 'neg'}">${overall ? ((g.mean - overall) / Math.abs(overall) * 100).toFixed(1) + '%' : '—'}</td></tr>`).join('')}
       </tbody></table></div>${groups.length > 20 ? `<p class="dim small">Showing top 20 of ${groups.length} groups.</p>` : ''}`;
-    if (global.PrismaAnim) global.PrismaAnim.play(el('exploreOut'));
+    if (global.TabulaMetricsAnim) global.TabulaMetricsAnim.play(el('exploreOut'));
   }
 
   function drawScatter() {
@@ -883,7 +1025,7 @@
     const r = A.pearson(xs, ys), rho = A.spearman(xs, ys), p = A.corrPValue(r, xs.length);
     el('scatterOut').innerHTML = `<p class="dim small">n = ${xs.length} · r = ${r.toFixed(3)} · ρ = ${rho.toFixed(3)} · ${fmtP(p)} · r² = ${(r * r * 100).toFixed(1)}%</p>
       ${C.scatter(xs, ys, { width: 760, height: 380, xLabel: x, yLabel: y, xCurrency: a.typeOf(x) === 'currency', yCurrency: a.typeOf(y) === 'currency' })}`;
-    if (global.PrismaAnim) global.PrismaAnim.play(el('scatterOut'));
+    if (global.TabulaMetricsAnim) global.TabulaMetricsAnim.play(el('scatterOut'));
   }
 
   function drawPivot() {
@@ -891,7 +1033,7 @@
     const r = el('pvRow').value, c = el('pvCol').value, m = el('pvMetric').value, agg = el('pvAgg').value;
     const ct = A.crossTab(a.rows, r, c, m || null, agg);
     el('pivotOut').innerHTML = C.heatmap(ct, { currency: m && a.typeOf(m) === 'currency', maxWidth: pivotWidth() });
-    if (global.PrismaAnim) global.PrismaAnim.play(el('pivotOut'));
+    if (global.TabulaMetricsAnim) global.TabulaMetricsAnim.play(el('pivotOut'));
   }
 
   // Width available to the pivot. Measured from the live container when it
@@ -914,19 +1056,21 @@
   /* ---------- wiring ---------- */
   function wireDashboard(a) {
     $$('.tab').forEach((t) => t.addEventListener('click', () => {
-      $$('.tab').forEach((x) => x.classList.remove('active'));
+      $$('.tab').forEach((x) => { x.classList.remove('active'); x.setAttribute('aria-current', 'false'); });
       $$('.tabpane').forEach((x) => x.classList.remove('active'));
       t.classList.add('active');
+      t.setAttribute('aria-current', 'page');
       const pane = el('tab-' + t.dataset.tab);
       pane.classList.add('active');
       if (t.dataset.tab === 'explore') { drawExplore(); if (el('scX')) drawScatter(); }
-      // Scroll to the tab strip, not the very top. Jumping to 0 left the
-      // summary + KPI block filling the viewport, so the tab's own content
-      // started ~1400px down and the pane looked blank until you scrolled.
       scrollToTabs();
-      // swapTab defers observe() to the next frame, once the pane has layout
-      if (global.PrismaAnim) global.PrismaAnim.swapTab(pane);
+      if (global.TabulaMetricsAnim) global.TabulaMetricsAnim.swapTab(pane);
     }));
+    $$('[data-tab-link]').forEach((link) => link.addEventListener('click', () => {
+      const target = $(`.tab[data-tab="${link.dataset.tabLink}"]`);
+      if (target) target.click();
+    }));
+    if (el('replaceFileBtn')) el('replaceFileBtn').addEventListener('click', () => { el('fileInput').value = ''; el('fileInput').click(); });
     ['pvRow', 'pvCol', 'pvMetric', 'pvAgg'].forEach((id) => { const e = el(id); if (e) e.addEventListener('change', drawPivot); });
     if (el('pvRow')) {
       let rt = null;
@@ -937,7 +1081,8 @@
   }
 
   function clearSession() {
-    STATE.dataset = null; STATE.analysis = null; STATE.attestation = null; STATE.pendingScan = null; STATE.pendingDataset = null;
+    cancelWorker();
+    STATE.dataset = null; STATE.analysis = null; STATE.types = Object.create(null); STATE.attestation = null; STATE.pendingScan = null; STATE.pendingDataset = null; STATE.pendingTypes = null;
     el('dashboard').style.display = 'none'; el('dashboard').innerHTML = '';
     el('landing').style.display = 'block';
     el('appbar').classList.remove('active');
@@ -951,14 +1096,15 @@
     const style = [...document.querySelectorAll('style')].map((s) => s.textContent).join('\n');
     const theme = document.documentElement.getAttribute('data-theme');
     const panes = TABS.map(([id, label]) => `<h2 class="exph">${label}</h2>${el('tab-' + id).innerHTML}`).join('');
-    const html = `<!doctype html><html data-theme="${theme}"><head><meta charset="utf-8"><title>PrismaStudio report — ${esc(STATE.dataset.name)}</title><style>${style}
+    const html = `<!doctype html><html data-theme="${esc(theme || 'daylight')}"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' https://fonts.googleapis.com; img-src data:; font-src data: https://fonts.gstatic.com; base-uri 'none'; form-action 'none'"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&amp;display=swap" rel="stylesheet"><title>TabulaMetrics report — ${esc(STATE.dataset.name)}</title><style>${style}
       .tabpane{display:block!important} .tabs{display:none} .controls{display:none} .exph{margin:32px 0 8px;font-size:22px}</style></head>
-      <body><main class="wrap"><h1>PrismaStudio report</h1><p class="dim">${esc(STATE.dataset.name)} · ${a.rows.length.toLocaleString()} rows × ${a.columns.length} columns · generated ${new Date().toLocaleString()}</p>
+      <body><main class="wrap"><h1>TabulaMetrics report</h1><p class="dim">${esc(STATE.dataset.name)} · ${a.rows.length.toLocaleString()} rows × ${a.columns.length} columns · generated ${new Date().toLocaleString()}</p>
+      <section class="card"><p class="dim small"><b>Data handling note:</b> This export includes analysis and up to 200 source-data rows. Protect the file and any copies accordingly.</p></section>
       ${STATE.attestation ? `<section class="card"><p class="dim small"><b>No-PHI attestation:</b> the uploader confirmed on ${esc(new Date(STATE.attestation.at).toLocaleString())} that “${esc(STATE.attestation.file || 'this file')}” contains no protected health information. Flagged terms: ${STATE.attestation.terms.map((t) => esc(t)).join(', ') || 'n/a'}.</p></section>` : ''}
       <section class="card summary"><h2>Executive summary</h2><p class="lead">${a.summary}</p></section>
       ${renderKpiStrip(a)}${panes}</main></body></html>`;
-    download(html, `prismastudio-report-${Date.now()}.html`, 'text/html');
-    toast('Report exported as a standalone HTML file.');
+    download(html, `tabulametrics-report-${Date.now()}.html`, 'text/html');
+    toast('Report exported with analysis and up to 200 data rows. Save and share carefully.');
   }
   function download(content, name, type) {
     const blob = new Blob([content], { type });
@@ -1058,5 +1204,5 @@
   }
 
   document.addEventListener('DOMContentLoaded', boot);
-  global.PrismaApp = { STATE, analyse, loadDataset };
+  global.TabulaMetricsApp = { STATE, analyse, loadDataset };
 })(typeof window !== 'undefined' ? window : globalThis);

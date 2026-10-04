@@ -15,7 +15,7 @@ const serve = (port) => new Promise((res) => {
   }).listen(port, '127.0.0.1', () => res(s));
 });
 
-const TABS = ['findings', 'drivers', 'relations', 'segments', 'columns', 'time', 'quality', 'explore', 'data'];
+const TABS = ['overview', 'findings', 'drivers', 'relations', 'segments', 'columns', 'time', 'quality', 'explore', 'data'];
 
 (async () => {
   const server = await serve(5200);
@@ -82,6 +82,43 @@ const TABS = ['findings', 'drivers', 'relations', 'segments', 'columns', 'time',
     await page.close();
   }
 
+  // ---- narrow-screen layout and brand lockup ----
+  const pMobile = await browser.newPage({ viewport: { width: 320, height: 740 } });
+  pMobile.on('pageerror', (e) => errs.push('MOBILE PAGEERROR: ' + e.message));
+  pMobile.on('console', (m) => { if (m.type() === 'error') errs.push('MOBILE CONSOLE: ' + m.text()); });
+  await pMobile.goto('http://127.0.0.1:5200/');
+  for (const width of [320, 390, 600]) {
+    await pMobile.setViewportSize({ width, height: 820 });
+    const landingWidth = await pMobile.evaluate(() => document.documentElement.scrollWidth);
+    if (landingWidth !== width) fails.push(`${width}px landing: horizontal overflow to ${landingWidth}px`);
+  }
+  await pMobile.setViewportSize({ width: 320, height: 740 });
+  await pMobile.click('#sampleInsuranceBtn');
+  await pMobile.waitForSelector('#analyzeBtn');
+  await pMobile.click('#analyzeBtn');
+  await pMobile.waitForSelector('.kpis');
+  for (const width of [320, 390, 600]) {
+    await pMobile.setViewportSize({ width, height: 820 });
+    const layout = await pMobile.evaluate(() => {
+      const rect = (selector) => {
+        const r = document.querySelector(selector).getBoundingClientRect();
+        return { left:r.left,right:r.right,top:r.top,bottom:r.bottom };
+      };
+      const overlaps = (a,b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+      const tabs = document.querySelector('.tabs');
+      return {
+        width:innerWidth,documentWidth:document.documentElement.scrollWidth,
+        brandThemeOverlap:overlaps(rect('.brand-lockup'),rect('#themeSel')),
+        actionOverlap:overlaps(rect('#exportBtn'),rect('#clearBtn')),
+        tabsScrollable:tabs.scrollWidth>tabs.clientWidth,
+      };
+    });
+    if (layout.documentWidth !== width || layout.brandThemeOverlap || layout.actionOverlap || !layout.tabsScrollable) {
+      fails.push(`${width}px dashboard layout regression: ${JSON.stringify(layout)}`);
+    }
+  }
+  await pMobile.close();
+
   // ---- attestation modal for genuinely clinical data ----
   const p2 = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   p2.on('pageerror', (e) => errs.push('PAGEERROR: ' + e.message));
@@ -91,7 +128,7 @@ const TABS = ['findings', 'drivers', 'relations', 'segments', 'columns', 'time',
   await p2.setInputFiles('#fileInput', clinical);
   await p2.waitForTimeout(800);
   const gate = await p2.evaluate(() => ({
-    shown: document.body.innerText.includes('looks like health data'),
+    shown: document.body.innerText.includes('may contain health data'),
     box: !!document.getElementById('attestBox'),
     disabled: !!(document.getElementById('hbProceed') || {}).disabled,
   }));
@@ -106,7 +143,7 @@ const TABS = ['findings', 'drivers', 'relations', 'segments', 'columns', 'time',
   await p2.waitForSelector('.kpis', { timeout: 20000 });
   const after = await p2.evaluate(() => ({
     pill: document.body.innerText.includes('No-PHI attestation'),
-    recorded: !!window.PrismaApp.STATE.attestation,
+    recorded: !!window.TabulaMetricsApp.STATE.attestation,
   }));
   console.log('after attesting:', after);
   if (!after.pill || !after.recorded) fails.push('attestation not recorded/surfaced: ' + JSON.stringify(after));
@@ -119,7 +156,7 @@ const TABS = ['findings', 'drivers', 'relations', 'segments', 'columns', 'time',
   await p3.setInputFiles('#fileInput', school);
   await p3.waitForTimeout(800);
   const schoolGate = await p3.evaluate(() => ({
-    gated: document.body.innerText.includes('looks like health data'),
+    gated: document.body.innerText.includes('may contain health data'),
     preview: !!document.getElementById('analyzeBtn'),
   }));
   console.log('school file:', schoolGate);

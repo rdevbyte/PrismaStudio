@@ -1,29 +1,51 @@
 /* ============================================================
-   PrismaStudio — File parsing (CSV / TSV / XLSX), zero deps.
+   TabulaMetrics — File parsing (CSV / TSV / XLSX), zero deps.
    XLSX is unzipped with the browser-native DecompressionStream,
    so no SheetJS / no CDN / works fully offline.
    ============================================================ */
 (function (global) {
   'use strict';
 
+  const LIMITS = Object.freeze({
+    maxRows: 100000,
+    maxColumns: 200,
+    maxCells: 1000000,
+    maxFieldChars: 1000000,
+    maxXlsxXmlBytes: 100 * 1024 * 1024,
+  });
+
   /* ---------------- delimited text ---------------- */
   function sniffDelimiter(text) {
-    const line = text.split(/\r?\n/).find((l) => l.trim()) || '';
+    const end = text.search(/\r?\n/);
+    const line = (end < 0 ? text : text.slice(0, end)).replace(/^\uFEFF/, '');
     const counts = { ',': 0, '\t': 0, ';': 0, '|': 0 };
     let inQ = false;
-    for (const ch of line) {
-      if (ch === '"') inQ = !inQ;
-      else if (!inQ && counts[ch] !== undefined) counts[ch]++;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQ && line[i + 1] === '"') i++;
+        else inQ = !inQ;
+      } else if (!inQ && counts[ch] !== undefined) counts[ch]++;
     }
     return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][1] > 0
       ? Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0] : ',';
   }
 
-  function parseDelimited(text, delim) {
+  function parseDelimited(text, delim, limits = LIMITS) {
     text = text.replace(/^\uFEFF/, '');
     const d = delim || sniffDelimiter(text);
     const rows = [];
-    let row = [], field = '', inQ = false, i = 0;
+    let row = [], field = '', inQ = false, i = 0, cells = 0;
+    const pushField = () => {
+      row.push(field); field = ''; cells++;
+      if (row.length > limits.maxColumns) throw new Error(`This file has more than ${limits.maxColumns} columns. Reduce the number of columns and try again.`);
+      if (cells > limits.maxCells) throw new Error(`This file has more than ${limits.maxCells.toLocaleString()} cells. Filter the data and try again.`);
+    };
+    const pushRow = () => {
+      pushField();
+      if (rows.length >= limits.maxRows) throw new Error(`This file has more than ${limits.maxRows.toLocaleString()} rows. Filter the data and try again.`);
+      rows.push(row); row = [];
+    };
     while (i < text.length) {
       const c = text[i];
       if (inQ) {
@@ -31,58 +53,89 @@
           if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
           inQ = false; i++; continue;
         }
-        field += c; i++; continue;
-      }
-      if (c === '"') { inQ = true; i++; continue; }
-      if (c === d) { row.push(field); field = ''; i++; continue; }
-      if (c === '\r') { i++; continue; }
-      if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
-      field += c; i++;
+        field += c; i++;
+      } else if (c === '"') { inQ = true; i++; }
+      else if (c === d) { pushField(); i++; }
+      else if (c === '\r') { i++; }
+      else if (c === '\n') { pushRow(); i++; }
+      else { field += c; i++; }
+      if (field.length > limits.maxFieldChars) throw new Error(`A single cell exceeds ${limits.maxFieldChars.toLocaleString()} characters. Shorten it and try again.`);
     }
-    if (field !== '' || row.length) { row.push(field); rows.push(row); }
+    if (field !== '' || row.length) { pushField(); if (rows.length >= limits.maxRows) throw new Error(`This file has more than ${limits.maxRows.toLocaleString()} rows. Filter the data and try again.`); rows.push(row); }
     return rows.filter((r) => r.some((v) => String(v).trim() !== ''));
   }
 
   /* ---------------- ZIP + XLSX ---------------- */
-  async function inflateRaw(bytes) {
+  async function inflateRaw(bytes, maxOutputBytes) {
     if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot open .xlsx files (no DecompressionStream). Please export your sheet as CSV.');
     const ds = new DecompressionStream('deflate-raw');
-    const stream = new Blob([bytes]).stream().pipeThrough(ds);
-    return new Uint8Array(await new Response(stream).arrayBuffer());
+    const reader = new Blob([bytes]).stream().pipeThrough(ds).getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxOutputBytes) {
+          await reader.cancel();
+          throw new Error('The expanded XLSX workbook exceeds the 100 MB safety limit. Save a smaller workbook or export as CSV.');
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
+    return out;
   }
 
   async function unzip(buf) {
     const view = new DataView(buf), bytes = new Uint8Array(buf);
-    // locate End Of Central Directory
     let eocd = -1;
     for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
-      if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+      if (i + 4 <= bytes.length && view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
     }
     if (eocd < 0) throw new Error('Not a valid .xlsx file (no ZIP directory found).');
     const count = view.getUint16(eocd + 10, true);
+    if (count > 10000) throw new Error('This XLSX contains an unreasonable number of ZIP entries.');
     let off = view.getUint32(eocd + 16, true);
-    const files = {};
+    const files = Object.create(null);
     for (let n = 0; n < count; n++) {
-      if (view.getUint32(off, true) !== 0x02014b50) break;
+      if (off + 46 > bytes.length || view.getUint32(off, true) !== 0x02014b50) throw new Error('The XLSX ZIP directory is malformed.');
       const method = view.getUint16(off + 10, true);
       const compSize = view.getUint32(off + 20, true);
       const nameLen = view.getUint16(off + 28, true);
       const extraLen = view.getUint16(off + 30, true);
       const commentLen = view.getUint16(off + 32, true);
       const localOff = view.getUint32(off + 42, true);
-      const name = new TextDecoder().decode(bytes.subarray(off + 46, off + 46 + nameLen));
-      // read local header to find data start
+      const nameEnd = off + 46 + nameLen;
+      const nextOff = nameEnd + extraLen + commentLen;
+      if (nextOff > bytes.length || localOff + 30 > bytes.length) throw new Error('The XLSX ZIP directory is malformed.');
+      const name = new TextDecoder().decode(bytes.subarray(off + 46, nameEnd));
+      if (view.getUint32(localOff, true) !== 0x04034b50) throw new Error('The XLSX ZIP entry is malformed.');
       const lNameLen = view.getUint16(localOff + 26, true);
       const lExtraLen = view.getUint16(localOff + 28, true);
       const dataStart = localOff + 30 + lNameLen + lExtraLen;
-      const raw = bytes.subarray(dataStart, dataStart + compSize);
-      files[name] = { method, raw };
-      off += 46 + nameLen + extraLen + commentLen;
+      if (dataStart + compSize > bytes.length) throw new Error('The XLSX ZIP entry is truncated.');
+      files[name] = { method, raw: bytes.subarray(dataStart, dataStart + compSize) };
+      off = nextOff;
     }
-    const out = {};
+    const out = Object.create(null);
+    let totalBytes = 0;
     for (const [name, f] of Object.entries(files)) {
       if (!/\.(xml|rels)$/i.test(name)) continue;
-      out[name] = new TextDecoder().decode(f.method === 0 ? f.raw : await inflateRaw(f.raw));
+      const remaining = LIMITS.maxXlsxXmlBytes - totalBytes;
+      if (remaining <= 0) throw new Error('The expanded XLSX workbook exceeds the 100 MB safety limit. Save a smaller workbook or export as CSV.');
+      let decoded;
+      if (f.method === 0) decoded = f.raw;
+      else if (f.method === 8) decoded = await inflateRaw(f.raw, remaining);
+      else throw new Error(`Unsupported XLSX compression method ${f.method}.`);
+      totalBytes += decoded.byteLength;
+      if (totalBytes > LIMITS.maxXlsxXmlBytes) throw new Error('The expanded XLSX workbook exceeds the 100 MB safety limit. Save a smaller workbook or export as CSV.');
+      out[name] = new TextDecoder().decode(decoded);
     }
     return out;
   }
@@ -95,7 +148,9 @@
     return out;
   }
   const attr = (s, name) => { const m = new RegExp(`${name}="([^"]*)"`).exec(s || ''); return m ? m[1] : null; };
-  const unescapeXml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d)).replace(/&amp;/g, '&');
+  const unescapeXml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d)).replace(/&amp;/g, '&');
 
   function colToIndex(ref) {
     const m = /^([A-Z]+)/.exec(ref || ''); if (!m) return 0;
@@ -104,6 +159,32 @@
   }
   const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
   const excelDate = (serial) => new Date(EXCEL_EPOCH + Math.round(serial * 86400000));
+
+  function normalizeZipPath(base, target) {
+    const raw = target.startsWith('/') ? target.slice(1) : `${base}/${target}`;
+    const parts = [];
+    raw.split('/').forEach((part) => {
+      if (!part || part === '.') return;
+      if (part === '..') parts.pop();
+      else parts.push(part);
+    });
+    return parts.join('/');
+  }
+
+  function resolveFirstWorksheet(workbookXml, relsXml, files) {
+    const sheets = xmlTags(workbookXml, 'sheet');
+    if (!sheets.length) throw new Error('No worksheets found in this workbook.');
+    const relationships = new Map(xmlTags(relsXml || '', 'Relationship').map((r) => [attr(r.attrs, 'Id'), attr(r.attrs, 'Target')]));
+    const ordered = [...sheets.filter((s) => attr(s.attrs, 'state') !== 'hidden' && attr(s.attrs, 'state') !== 'veryHidden'), ...sheets.filter((s) => ['hidden', 'veryHidden'].includes(attr(s.attrs, 'state')))];
+    for (const sheet of ordered) {
+      const relId = attr(sheet.attrs, 'r:id');
+      const target = relId && relationships.get(relId);
+      if (!target) continue;
+      const key = normalizeZipPath('xl', target);
+      if (files[key]) return { key, name: attr(sheet.attrs, 'name') || 'Sheet1' };
+    }
+    throw new Error('Could not resolve the first worksheet in this workbook. Save it again as .xlsx or export as CSV.');
+  }
 
   async function parseXlsx(buf) {
     const files = await unzip(buf);
@@ -133,21 +214,26 @@
         if (customDate.has(id) || (builtin >= 14 && builtin <= 22) || (builtin >= 45 && builtin <= 47)) dateStyles.add(i);
       });
     }
-    // find first worksheet
+    // Follow workbook order and its relationship IDs; sheet file numbers do not
+    // define tab order and may not match the first visible sheet.
     const wbXml = files['xl/workbook.xml'] || '';
-    const sheetNames = xmlTags(wbXml, 'sheet').map((s) => attr(s.attrs, 'name'));
-    const sheetKeys = Object.keys(files).filter((k) => /^xl\/worksheets\/sheet\d+\.xml$/.test(k))
-      .sort((a, b) => +(/(\d+)/.exec(a)[1]) - +(/(\d+)/.exec(b)[1]));
-    if (!sheetKeys.length) throw new Error('No worksheets found in this workbook.');
-    const sheetXml = files[sheetKeys[0]];
+    const relsXml = files['xl/_rels/workbook.xml.rels'] || '';
+    const firstSheet = resolveFirstWorksheet(wbXml, relsXml, files);
+    const sheetXml = files[firstSheet.key];
+    const rowTags = xmlTags(sheetXml, 'row');
+    if (rowTags.length > LIMITS.maxRows) throw new Error(`This worksheet has more than ${LIMITS.maxRows.toLocaleString()} rows. Filter the data and try again.`);
     const rows = [];
-    xmlTags(sheetXml, 'row').forEach((r) => {
+    let totalCells = 0;
+    rowTags.forEach((r) => {
       const cells = [];
       const re = /<c(\s[^>]*)?(?:\/>|>([\s\S]*?)<\/c>)/g;
       let m;
       while ((m = re.exec(r.inner))) {
         const a = m[1] || '', inner = m[2] || '';
         const idx = colToIndex(attr(a, 'r'));
+        if (idx >= LIMITS.maxColumns) throw new Error(`This worksheet has more than ${LIMITS.maxColumns} columns. Reduce the number of columns and try again.`);
+        totalCells++;
+        if (totalCells > LIMITS.maxCells) throw new Error(`This worksheet has more than ${LIMITS.maxCells.toLocaleString()} cells. Filter the data and try again.`);
         const t = attr(a, 't');
         const sIdx = attr(a, 's') != null ? +attr(a, 's') : -1;
         let val = null;
@@ -173,17 +259,23 @@
       for (let i = 0; i < cells.length; i++) if (cells[i] === undefined) cells[i] = '';
       rows.push(cells);
     });
-    return { rows: rows.filter((r) => r.some((v) => v !== '' && v != null)), sheetName: sheetNames[0] || 'Sheet1' };
+    return { rows: rows.filter((r) => r.some((v) => v !== '' && v != null)), sheetName: firstSheet.name };
   }
 
   /* ---------------- header handling ---------------- */
   function dedupeHeaders(hdr) {
-    const seen = new Map();
+    const used = new Set();
+    const nextSuffix = new Map();
     return hdr.map((h, i) => {
-      let name = String(h == null ? '' : h).trim();
-      if (!name) name = `Column ${i + 1}`;
-      if (seen.has(name)) { const c = seen.get(name) + 1; seen.set(name, c); return `${name} (${c})`; }
-      seen.set(name, 1); return name;
+      const base = String(h == null ? '' : h).trim() || `Column ${i + 1}`;
+      let name = base;
+      if (used.has(name)) {
+        let suffix = nextSuffix.get(base) || 2;
+        do { name = `${base} (${suffix++})`; } while (used.has(name));
+        nextSuffix.set(base, suffix);
+      }
+      used.add(name);
+      return name;
     });
   }
 
@@ -206,13 +298,17 @@
 
   function toObjects(matrix) {
     if (!matrix.length) return { columns: [], rows: [] };
+    if (matrix.length > LIMITS.maxRows) throw new Error(`This file has more than ${LIMITS.maxRows.toLocaleString()} rows. Filter the data and try again.`);
     const hIdx = findHeaderRow(matrix);
-    const width = Math.max(...matrix.map((r) => r.length));
+    let width = 0;
+    for (const row of matrix) if (row.length > width) width = row.length;
+    if (width > LIMITS.maxColumns) throw new Error(`This file has more than ${LIMITS.maxColumns} columns. Reduce the number of columns and try again.`);
+    if (width * Math.max(0, matrix.length - hIdx - 1) > LIMITS.maxCells) throw new Error(`This file expands to more than ${LIMITS.maxCells.toLocaleString()} cells. Filter the data and try again.`);
     const header = dedupeHeaders(Array.from({ length: width }, (_, i) => matrix[hIdx][i]));
     const rows = [];
     for (let i = hIdx + 1; i < matrix.length; i++) {
       const r = matrix[i];
-      const o = {};
+      const o = Object.create(null);
       let any = false;
       for (let j = 0; j < width; j++) {
         const v = r[j];
@@ -277,37 +373,34 @@
   // Contexts that are routinely non-clinical, used to discount weak hits.
   const EDU_CONTEXT = /\b(student|pupil|grade|gpa|semester|teacher|classroom|homeroom|attendance|enrol|course|school|district|transcript|iep|504)\b/i;
 
-  const NEGATION = /\b(no phi|no-phi|nophi|de-?identified|deidentified|synthetic|anonymi[sz]ed|test data|dummy data|sample data|not phi|contains no phi|phi[- ]free)\b/i;
-
+  const DECLARATION_HINT = /\b(no phi|no-phi|nophi|de-?identified|deidentified|synthetic|anonymi[sz]ed|test data|dummy data|sample data|not phi|contains no phi|phi[- ]free)\b/i;
   const wordRe = (term) => new RegExp(`(^|[^a-z0-9])(${term})([^a-z0-9]|$)`, 'i');
+  const STRONG_RES = HEALTH_STRONG.map((term) => [term, wordRe(term)]);
+  const WEAK_RES = HEALTH_WEAK.map((term) => [term, wordRe(term)]);
 
   function healthScan(columns, rows) {
     const headerHay = columns.join(' | ');
-    // Scan the WHOLE file for a declaration, not just the first rows — a note
-    // placed in a trailing row or a far column used to be missed entirely.
-    const allText = rows.map((r) => Object.values(r).join(' ')).join(' ');
-    const declHay = headerHay + ' ' + allText;
-    if (NEGATION.test(declHay)) return { blocked: false, override: true };
-
-    const bodySample = rows.slice(0, 60).map((r) => Object.values(r).join(' ')).join(' ');
-
-    const strongHits = HEALTH_STRONG.filter((t) => wordRe(t).test(headerHay) || wordRe(t).test(bodySample));
-    const weakHits = HEALTH_WEAK.filter((t) => wordRe(t).test(headerHay));
+    const strongHits = new Set();
+    for (const [term, re] of STRONG_RES) if (re.test(headerHay)) strongHits.add(term);
+    const missingStrong = STRONG_RES.filter(([term]) => !strongHits.has(term));
+    const weakHits = WEAK_RES.filter(([, re]) => re.test(headerHay)).map(([term]) => term);
     const eduContext = EDU_CONTEXT.test(headerHay);
+    let declarationHint = DECLARATION_HINT.test(headerHay);
 
-    // Block on any strong identifier, or on 2+ weak clinical terms.
-    // In an obvious education context, require 3+ weak terms.
+    // Scan every parsed record for strong identifiers. A free-text phrase such
+    // as "sample data" is only a hint; it never overrides a clinical hit or
+    // substitutes for the user's explicit, in-app attestation.
+    for (const row of rows) {
+      const text = Object.values(row).join(' ');
+      if (!declarationHint && DECLARATION_HINT.test(text)) declarationHint = true;
+      for (const [term, re] of missingStrong) if (!strongHits.has(term) && re.test(text)) strongHits.add(term);
+    }
+
     const weakNeeded = eduContext ? 3 : 2;
-    const blocked = strongHits.length > 0 || weakHits.length >= weakNeeded;
+    const blocked = strongHits.size > 0 || weakHits.length >= weakNeeded;
     const terms = [...new Set([...strongHits, ...weakHits])].map((t) => t.replace(/[-?()]/g, (m) => (m === '?' ? '' : m)));
-    return {
-      blocked,
-      terms,
-      strong: strongHits.length,
-      weak: weakHits.length,
-      eduContext,
-    };
+    return { blocked, terms, strong: strongHits.size, weak: weakHits.length, eduContext, declarationHint, override: false };
   }
 
-  global.PrismaParse = { parseFile, parseText, parseDelimited, sniffDelimiter, healthScan, toObjects };
+  global.TabulaMetricsParse = { parseFile, parseText, parseDelimited, sniffDelimiter, healthScan, toObjects };
 })(typeof window !== 'undefined' ? window : globalThis);

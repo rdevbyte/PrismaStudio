@@ -1,10 +1,10 @@
 /* ============================================================
-   PrismaStudio — Chart primitives (dependency-free inline SVG)
+   TabulaMetrics — Chart primitives (dependency-free inline SVG)
    Every chart returns an SVG string. Theme-aware via CSS vars.
    ============================================================ */
 (function (global) {
   'use strict';
-  const A = global.PrismaAnalysis;
+  const A = global.TabulaMetricsAnalysis;
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const trunc = (s, n) => (String(s).length > n ? String(s).slice(0, n - 1) + '…' : String(s));
   const PAL = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c5)', 'var(--c6)', 'var(--c7)', 'var(--c8)'];
@@ -30,7 +30,8 @@
     const w = opts.width || 560, rowH = opts.rowH || 30, padL = opts.padL || 150, padR = 90, padT = 8;
     const n = items.length, h = n * rowH + padT + 26;
     const vals = items.map((i) => i.value);
-    const max = Math.max(0, ...vals), min = Math.min(0, ...vals);
+    const range = vals.length ? A.minMax(vals) : { min: 0, max: 0 };
+    const max = Math.max(0, range.max), min = Math.min(0, range.min);
     const span = max - min || 1;
     const x = (v) => padL + ((v - min) / span) * (w - padL - padR);
     const zero = x(0);
@@ -77,7 +78,8 @@
     const w = opts.width || 560, rowH = 34, padL = 150, padR = 60, padT = 8;
     const h = groups.length * rowH + padT + 24;
     const all = groups.flatMap((g) => [g.min, g.max]);
-    const min = Math.min(...all), max = Math.max(...all), span = max - min || 1;
+    const range = A.minMax(all);
+    const min = range.min, max = range.max, span = max - min || 1;
     const x = (v) => padL + ((v - min) / span) * (w - padL - padR);
     let s = `<svg viewBox="0 0 ${w} ${h}" class="chart" data-anim="box">`;
     niceTicks(min, max, 4).forEach((t) => {
@@ -98,7 +100,8 @@
   function scatter(xs, ys, opts = {}) {
     const w = opts.width || 460, h = opts.height || 300, padL = 54, padB = 36, padT = 12, padR = 14;
     if (!xs.length) return '';
-    const xmin = Math.min(...xs), xmax = Math.max(...xs), ymin = Math.min(...ys), ymax = Math.max(...ys);
+    const xr = A.minMax(xs), yr = A.minMax(ys);
+    const xmin = xr.min, xmax = xr.max, ymin = yr.min, ymax = yr.max;
     const X = (v) => padL + ((v - xmin) / (xmax - xmin || 1)) * (w - padL - padR);
     const Y = (v) => h - padB - ((v - ymin) / (ymax - ymin || 1)) * (h - padB - padT);
     let s = `<svg viewBox="0 0 ${w} ${h}" class="chart" data-anim="scatter">`;
@@ -136,8 +139,9 @@
     if (!pts.length) return '';
     const allT = [...pts.map((p) => p.t), ...(fc ? fc.points.map((p) => p.t) : [])];
     const allV = [...pts.map((p) => p.value), ...(fc ? fc.points.flatMap((p) => [p.lower, p.upper]) : [])].filter(isFinite);
-    const tmin = Math.min(...allT), tmax = Math.max(...allT);
-    let vmin = Math.min(...allV), vmax = Math.max(...allV);
+    const tr = A.minMax(allT), vr = A.minMax(allV);
+    const tmin = tr.min, tmax = tr.max;
+    let vmin = vr.min, vmax = vr.max;
     const pad = (vmax - vmin) * 0.08 || 1; vmin -= pad; vmax += pad;
     const X = (t) => padL + ((t - tmin) / (tmax - tmin || 1)) * (w - padL - padR);
     const Y = (v) => h - padB - ((v - vmin) / (vmax - vmin || 1)) * (h - padB - padT);
@@ -333,5 +337,5 @@
     return s + '</svg>';
   }
 
-  global.PrismaCharts = { barH, histogramChart, boxPlot, scatter, timeSeries, heatmap, donut, corrMatrix, paretoChart, missingness, niceTicks, PAL };
+  global.TabulaMetricsCharts = { barH, histogramChart, boxPlot, scatter, timeSeries, heatmap, donut, corrMatrix, paretoChart, missingness, niceTicks, PAL };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -14,4 +14,4 @@ http.createServer((req, res) => {
   if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(DIST, 'index.html');
   res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
   fs.createReadStream(file).pipe(res);
-}).listen(PORT, '0.0.0.0', () => console.log(`PrismaStudio running at http://0.0.0.0:${PORT}`));
+}).listen(PORT, '0.0.0.0', () => console.log(`TabulaMetrics running at http://0.0.0.0:${PORT}`));

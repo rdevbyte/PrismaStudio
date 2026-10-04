@@ -1,5 +1,5 @@
 /* ============================================================
-   PrismaStudio — Animation layer (GSAP 3)
+   TabulaMetrics — Animation layer (GSAP 3)
    Charts animate in when scrolled into view, and re-animate when
    their data changes. Honours prefers-reduced-motion.
    ============================================================ */
@@ -297,5 +297,5 @@
     gsap.from(node, { opacity: 0, scale: 0.96, y: 10, duration: 0.32, ease: EASE_OUT });
   }
 
-  global.PrismaAnim = { observe, play, countUp, swapTab, enterDashboard, modalIn, animateSvg, REDUCED, enabled: !!gsap && !REDUCED };
+  global.TabulaMetricsAnim = { observe, play, countUp, swapTab, enterDashboard, modalIn, animateSvg, REDUCED, enabled: !!gsap && !REDUCED };
 })(typeof window !== 'undefined' ? window : globalThis);

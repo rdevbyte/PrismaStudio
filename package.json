@@ -1,5 +1,5 @@
 {
-  "name": "prismastudio",
+  "name": "tabulametrics",
   "private": true,
   "version": "2.0.0",
   "description": "Zero-persistence, no-AI data analysis studio. Drop a spreadsheet, get drivers, correlations, segments, profiles, trends and projections — computed entirely in the browser.",
@@ -11,10 +11,11 @@
     "build": "node build.js",
     "dev": "node build.js && node serve.js",
     "start": "node serve.js",
-    "test": "node test/engine.test.js && node test/edge.test.js",
-    "test:ui": "node build.js && node test/ui.test.js",
-    "test:anim": "node build.js && node test/anim.test.js",
-    "pretest:ui": "npm i --no-save playwright@1.47.0",
-    "pretest:anim": "npm i --no-save playwright@1.47.0"
+    "test": "node test/engine.test.js && node test/edge.test.js && node test/guard.test.js && node test/regression.test.js",
+    "test:ui": "node build.js && node test/ui.test.js && node test/landing.test.js && node test/nosignal.test.js",
+    "test:anim": "node build.js && node test/anim.test.js"
+  },
+  "devDependencies": {
+    "playwright": "1.55.1"
   }
 }

@@ -76,7 +76,7 @@ function structuredCsv(rows = 1000) {
       }, tab);
     }
     out.stats = await p.evaluate(() => {
-      const a = window.PrismaApp.STATE.analysis;
+      const a = window.TabulaMetricsApp.STATE.analysis;
       return { drivers: a.driverResults.length, driverAll: (a.driverAll || []).length, corr: a.correlations.length, corrAll: (a.correlationsAll || []).length };
     });
     await p.close();

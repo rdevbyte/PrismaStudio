@@ -1,4 +1,4 @@
-# Deploying PrismaStudio
+# Deploying TabulaMetrics
 
 ## Why it kept failing
 
@@ -29,14 +29,15 @@ So: the files must be copied out of this workspace and pushed to your repo. Step
 | File | What it is | Unzip? |
 |---|---|---|
 | **`dist/index.html`** | The finished app, one file | n/a — **use this one** |
-| `PrismaStudio.html` | Identical file, different name | n/a |
-| `PrismaStudio-SITE.zip` | Contains just `index.html` | Yes, if you want the folder |
-| `PrismaStudio-deploy.zip` | **Source code**, needs building | Yes, then `node build.js` |
+| `TabulaMetrics.html` | Identical file, different name | n/a |
+| `TabulaMetrics-SITE.zip` | Contains just `index.html` | Yes, if you want the folder |
+| `TabulaMetrics-deploy.zip` | **Source code**, needs building | Yes, then `node build.js` |
 
-**You do not need either zip.** They exist for convenience. The app is a single
-self-contained HTML file — download `dist/index.html` and you have everything.
+**You do not need either zip.** They exist for convenience. The app is delivered as one
+standalone HTML file — its analysis/runtime are inline, and Google Sans is an optional
+Google Fonts resource with a local sans-serif fallback.
 
-`PrismaStudio-deploy.zip` is source only: it has no `dist/` inside, so if you
+`TabulaMetrics-deploy.zip` is source only: it has no `dist/` inside, so if you
 upload it to Vercel without running the build you get nothing to serve.
 
 ## Deploy (pick one)
@@ -44,30 +45,32 @@ upload it to Vercel without running the build you get nothing to serve.
 ### Option A — drag and drop, no git, ~30 seconds ← easiest
 
 1. Download **`dist/index.html`**.
-2. Put it alone in a folder (any name, e.g. `prismastudio`).
+2. Put it alone in a folder (any name, e.g. `tabulametrics`).
    The file **must** be named `index.html` so Vercel serves it at `/`.
 3. Go to **vercel.com/new** → drag the *folder* (not the file) onto the page.
 
 Done. No repo, no build, no zip, no settings.
 
-If you prefer, `PrismaStudio-SITE.zip` already contains exactly that folder
+If you prefer, `TabulaMetrics-SITE.zip` already contains exactly that folder
 layout — unzip it and drag the resulting folder.
 
 ### Option B — GitHub (proper setup)
 
-1. Download these from the workspace (or use the `PrismaStudio-deploy.zip` I generated):
+1. Download the current source files from the workspace (or use `TabulaMetrics-deploy.zip`, which includes source, tests, lockfile, and documentation):
 
    ```
-   src/            build.js
-   package.json    vercel.json
-   .gitignore      .vercelignore
+   src/             test/ (optional for deployment)
+   build.js         serve.js
+   package.json     package-lock.json
+   vercel.json      .gitignore      .vercelignore
+   README.md        PRIVACY.md      LEGAL-NOTES.md      DEPLOY.md
    ```
 
 2. Replace the contents of your repo with them, then:
 
    ```bash
    git add -A
-   git commit -m "PrismaStudio v2: static build, fix Vercel deploy"
+   git commit -m "TabulaMetrics v2: static build, fix Vercel deploy"
    git push
    ```
 
@@ -112,16 +115,14 @@ Any toggle showing **Override** in blue is ignoring `vercel.json`. Switch it off
 }
 ```
 
-The build has **zero npm dependencies** — `build.js` is plain Node that concatenates `src/` into one HTML file. Nothing to install, nothing to resolve, nothing to go wrong. `playwright` was removed from `dependencies` entirely (it's installed on demand only when you run browser tests), because a ~300 MB browser download during a Vercel build is a common cause of timeouts.
+The static app build uses **no npm runtime dependencies** — `build.js` is plain Node that concatenates `src/` into one HTML file. Vercel's `installCommand` skips package installation, so the browser-test dependency and browser are not downloaded during deployment. `playwright` is pinned as a development dependency for the local UI/animation test suites only.
 
-Verified in a clean room with no `node_modules` and no lockfile:
+The current build was verified locally:
 
 ```
---- install ---  no dependencies required
---- build ---    Built: 250 KB → dist/index.html
-GSAP inlined : true
-engine       : true
-no external  : true
+--- build ---    Built: 565 KB → dist/index.html + TabulaMetrics.html
+--- app file --- approximately 565 KiB
+--- runtime ---  no external scripts, APIs, or analytics required
 ```
 
 ---
@@ -135,7 +136,7 @@ The build didn't run. Check the deploy log for the Build step — if it says `--
 Output Directory is wrong, or Root Directory is set to `frontend`. Both are in Settings → Build and Deployment.
 
 **Build succeeds but page is blank**
-Check the browser console. The app needs no network, so this would be a build artifact problem — confirm `dist/index.html` is ~250 KB, not a few hundred bytes.
+Check the browser console and confirm `dist/index.html` is roughly 565 KiB, not a few hundred bytes. The app does not need external scripts or APIs at runtime. If you use a hosted copy, the browser still makes the normal request to the host for the page; host-side request logging is separate from app data processing.
 
 **Deploy is slow or times out**
 Make sure `.vercelignore` is present. Without it, Vercel uploads `node_modules`, `.cache` (554 MB) and screenshots.
@@ -144,4 +145,4 @@ Make sure `.vercelignore` is present. Without it, Vercel uploads `node_modules`,
 
 ## No hosting needed
 
-`PrismaStudio.html` is fully self-contained — every byte of CSS, JS and GSAP is inlined and it makes no network requests. You can email it, drop it on a shared drive, or open it from a USB stick. It runs offline by double-clicking. Hosting is only for convenience of sharing a link.
+`TabulaMetrics.html` bundles its CSS, JavaScript, analysis worker, and GSAP. Google Sans is fetched from Google Fonts when online; if the font service is unreachable or you open the app offline, its system sans-serif fallbacks keep the app usable. You can email it, place it on a shared drive, or open it from a USB stick. When hosted, the browser requests the page from that host, and Google may receive ordinary metadata for font requests; neither request includes spreadsheet contents or analysis results. The app does not upload the spreadsheet during ordinary use. See `PRIVACY.md` for the distinction.
